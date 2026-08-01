@@ -1,0 +1,5 @@
+.venv
+storage
+tests
+**/__pycache__
+*.py[cod]
