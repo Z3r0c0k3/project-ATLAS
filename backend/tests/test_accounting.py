@@ -19,7 +19,7 @@ class AccountingValidationTest(unittest.TestCase):
 
         result = validate_ledger(1_000_000, transactions, evidence, 1_080_000)
 
-        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["error_count"], 0)
         self.assertEqual(result["summary"]["total_income"], 100_000)
         self.assertEqual(result["summary"]["total_expense"], 20_000)
@@ -32,7 +32,7 @@ class AccountingValidationTest(unittest.TestCase):
         result = validate_ledger(1_000_000, transactions, [], 960_000)
         codes = {issue["code"] for issue in result["issues"]}
 
-        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["status"], "ERROR")
         self.assertIn("BALANCE_CONTINUITY", codes)
         self.assertIn("MISSING_EXPENSE_EVIDENCE", codes)
         self.assertIn("CLOSING_BALANCE_MISMATCH", codes)
@@ -76,13 +76,15 @@ class PackageGenerationTest(unittest.TestCase):
                 40,
             )
 
-            self.assertEqual(result["validation"]["status"], "passed")
+            self.assertEqual(result["validation"]["status"], "PASS")
             with zipfile.ZipFile(result["zip_path"]) as archive:
                 names = set(archive.namelist())
             self.assertIn("수입지출관리대장.xlsx", names)
             self.assertIn("영수증_및_소명자료.docx", names)
             self.assertIn("계좌전체내역.docx", names)
             self.assertIn("검증_리포트.html", names)
+            self.assertIn("manifest.json", names)
+            self.assertEqual(len(result["zip_sha256"]), 64)
 
 
 if __name__ == "__main__":

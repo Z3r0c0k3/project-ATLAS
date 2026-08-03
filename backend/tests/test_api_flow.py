@@ -1,0 +1,157 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+import app.main as main
+from app.services.jobs import JobRunner
+from app.services.store import JsonStore
+
+
+TRANSACTIONS = [
+    {"number": 1, "date": "2026-03-01", "description": "회비", "income": 100_000, "expense": 0, "balance": 1_100_000},
+    {"number": 2, "date": "2026-03-02", "description": "현수막", "income": 0, "expense": 20_000, "balance": 1_080_000, "evidence_ids": ["ev1"]},
+]
+EVIDENCE = [
+    {"id": "ev1", "transaction_number": 2, "filename": "receipt.png", "kind": "receipt", "accessible": True, "amount": 20_000, "evidence_date": "2026-03-02"}
+]
+
+
+class ApiWorkflowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.previous_store = main.store
+        self.previous_jobs = main.jobs
+        main.store = JsonStore(Path(self.temp.name))
+        main.jobs = JobRunner(main.store, workers=1)
+        self.client = TestClient(main.app)
+        response = self.client.post("/auth/login", json={"username": "admin", "role": "admin"})
+        self.assertEqual(response.status_code, 200)
+        self.headers = {"X-ATLAS-Token": response.json()["token"]}
+
+    def tearDown(self) -> None:
+        main.jobs.executor.shutdown(wait=True)
+        main.store = self.previous_store
+        main.jobs = self.previous_jobs
+        self.temp.cleanup()
+
+    def test_package_public_link_webhook_and_audit_flow(self) -> None:
+        package_response = self.client.post(
+            "/packages/submission",
+            headers=self.headers,
+            json={
+                "club_name": "Aegis",
+                "semester": "2026년 1학기",
+                "period_start": "2026-03-01",
+                "period_end": "2026-06-30",
+                "treasurer_name": "회계",
+                "president_name": "회장",
+                "reviewer_name": "검토",
+                "opening_balance": 1_000_000,
+                "expected_closing_balance": 1_080_000,
+                "transactions": TRANSACTIONS,
+                "evidence": EVIDENCE,
+            },
+        )
+        self.assertEqual(package_response.status_code, 202)
+        created = package_response.json()
+
+        for _ in range(100):
+            job = self.client.get(f"/jobs/{created['job_id']}", headers=self.headers).json()
+            if job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        self.assertEqual(job["status"], "completed")
+
+        package = self.client.get(f"/packages/{created['package_id']}", headers=self.headers).json()
+        self.assertEqual(package["status"], "draft")
+        self.assertEqual(package["validation"]["status"], "PASS")
+        self.assertEqual(len(package["zip_sha256"]), 64)
+
+        submitted = self.client.post(f"/packages/{package['id']}/submit-review", headers=self.headers)
+        self.assertEqual(submitted.json()["status"], "pending_review")
+        approved = self.client.post(f"/packages/{package['id']}/approve", headers=self.headers, json={"reason": "ok"})
+        self.assertEqual(approved.json()["status"], "approved")
+
+        report_response = self.client.post(
+            "/monthly-reports",
+            headers=self.headers,
+            json={
+                "club_name": "Aegis",
+                "month": "2026년 3월",
+                "snapshot_id": created["snapshot_id"],
+                "opening_balance": 1_000_000,
+            },
+        )
+        self.assertEqual(report_response.status_code, 200)
+        report = report_response.json()
+        public = self.client.get(f"/public/monthly/{report['share_id']}")
+        self.assertEqual(public.status_code, 200)
+        self.assertIn("noindex", public.headers["x-robots-tag"])
+        self.assertNotIn("counterparty", public.text)
+
+        webhook = self.client.post(
+            "/discord/webhooks",
+            headers=self.headers,
+            json={"name": "test", "webhook_url": "https://discord.com/api/webhooks/123/secret"},
+        )
+        self.assertEqual(webhook.status_code, 200)
+        stored = list(main.store.read_collection("discord_webhooks").values())[0]
+        self.assertNotIn("discord.com", stored["encrypted_webhook_url"])
+
+        revoked = self.client.post(f"/monthly-reports/{report['report_id']}/revoke", headers=self.headers)
+        self.assertEqual(revoked.json()["status"], "revoked")
+        self.assertEqual(self.client.get(f"/public/monthly/{report['share_id']}").status_code, 410)
+
+        audit = self.client.get("/audit-logs", headers=self.headers).json()
+        self.assertTrue(audit["chain"]["valid"])
+        self.assertGreaterEqual(audit["chain"]["event_count"], 6)
+
+    def test_google_oauth_state_is_required_and_single_use(self) -> None:
+        redirect_uri = "https://atlas.example.com/"
+        with patch.dict(os.environ, {"GOOGLE_CLIENT_ID": "test-client"}):
+            prepared = self.client.get(
+                "/auth/google/authorize-url",
+                headers=self.headers,
+                params={"redirect_uri": redirect_uri},
+            )
+        self.assertEqual(prepared.status_code, 200)
+        state = prepared.json()["state"]
+
+        missing_state = self.client.post(
+            "/auth/google/connect",
+            headers=self.headers,
+            json={"authorization_code": "code", "redirect_uri": redirect_uri},
+        )
+        self.assertEqual(missing_state.status_code, 422)
+
+        with patch("app.main.exchange_authorization_code", return_value={"access_token": "access", "refresh_token": "refresh"}), patch(
+            "app.main.google_account_email", return_value="aegis@example.com"
+        ):
+            connected = self.client.post(
+                "/auth/google/connect",
+                headers=self.headers,
+                json={"authorization_code": "code", "redirect_uri": redirect_uri, "state": state},
+            )
+            replay = self.client.post(
+                "/auth/google/connect",
+                headers=self.headers,
+                json={"authorization_code": "code", "redirect_uri": redirect_uri, "state": state},
+            )
+
+        self.assertEqual(connected.status_code, 200)
+        self.assertTrue(connected.json()["connected"])
+        self.assertEqual(connected.json()["account_email"], "aegis@example.com")
+        self.assertEqual(replay.status_code, 409)
+        self.assertTrue(self.client.get("/auth/google/status", headers=self.headers).json()["connected"])
+        self.assertFalse(self.client.post("/auth/google/disconnect", headers=self.headers).json()["connected"])
+
+
+if __name__ == "__main__":
+    unittest.main()
