@@ -61,6 +61,9 @@ class ApiWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(package_response.status_code, 202)
         created = package_response.json()
+        queued = self.client.get(f"/jobs/{created['job_id']}", headers=self.headers).json()
+        self.assertEqual(queued["package_id"], created["package_id"])
+        self.assertEqual(queued["snapshot_id"], created["snapshot_id"])
 
         for _ in range(100):
             job = self.client.get(f"/jobs/{created['job_id']}", headers=self.headers).json()

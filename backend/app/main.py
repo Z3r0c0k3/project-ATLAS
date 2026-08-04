@@ -982,6 +982,7 @@ def create_submission_package(
 
     job = jobs.submit("submission_package", session, task)
     store.update("packages", package["id"], {"job_id": job["id"]})
+    store.update("jobs", job["id"], {"package_id": package["id"], "snapshot_id": snapshot["id"]})
     audit(session, "package.requested", "package", package["id"], after={"job_id": job["id"], "snapshot_id": snapshot["id"]}, request=request)
     return PackageJobResponse(
         job_id=job["id"],

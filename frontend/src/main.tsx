@@ -25,6 +25,7 @@ import {
 import "./styles.css";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/+$/, "");
+const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
 
 type TransactionInput = {
   transaction_id?: string;
@@ -274,15 +275,51 @@ function App() {
     finally { setBusy(""); }
   }
 
-  async function waitForJob(jobId: string): Promise<any> {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+  function jobIdOf(value: any): string {
+    return value?.id || value?.job_id || "";
+  }
+
+  function jobPackageIdOf(value: any, fallback?: string): string {
+    return value?.result?.package_id || value?.package_id || fallback || "";
+  }
+
+  async function waitForJob(jobId: string, packageId?: string): Promise<any> {
+    const startedAt = Date.now();
+    let attempt = 0;
+    while (Date.now() - startedAt < JOB_MAX_WAIT_MS) {
       const current = await request<any>(`/jobs/${jobId}`);
       setJob(current);
-      if (current.status === "completed") return current;
+      if (attempt % 5 === 0) setOutput(current);
+      if (current.status === "completed") {
+        const resolvedPackageId = jobPackageIdOf(current, packageId);
+        if (resolvedPackageId) {
+          const pkg = await request<any>(`/packages/${resolvedPackageId}`);
+          setPackageData(pkg);
+        }
+        setOutput(current);
+        return current;
+      }
       if (current.status === "failed") throw new Error(current.error || "문서 생성 작업이 실패했습니다.");
-      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      attempt += 1;
+      const elapsed = Date.now() - startedAt;
+      const interval = elapsed < 120_000 ? 1000 : elapsed < 600_000 ? 2000 : 5000;
+      await new Promise((resolve) => window.setTimeout(resolve, interval));
     }
-    throw new Error("문서 생성 시간이 초과되었습니다.");
+    throw new Error("문서 생성이 30분 이상 진행 중입니다. 작업 이력을 확인하거나 서버 로그를 확인해주세요.");
+  }
+
+  async function refreshCurrentJob() {
+    const currentJobId = jobIdOf(job);
+    if (!currentJobId) return;
+    const current: any = await run("작업 상태 확인", () => request(`/jobs/${currentJobId}`));
+    if (!current) return;
+    setJob(current);
+    const resolvedPackageId = jobPackageIdOf(current, packageData?.id);
+    if (current.status === "completed" && resolvedPackageId) {
+      const pkg = await request<any>(`/packages/${resolvedPackageId}`);
+      setPackageData(pkg);
+      setOutput({ job: current, package: pkg });
+    }
   }
 
   async function uploadForm(path: string, form: FormData): Promise<any> {
@@ -448,6 +485,31 @@ function App() {
     finally { setBusy(""); }
   }
 
+  async function createPackageJob() {
+    await run("패키지 생성", async () => {
+      const created: any = await request("/packages/submission", {
+        method: "POST",
+        body: JSON.stringify({
+          ...snapshotPayload,
+          club_name: clubName,
+          semester,
+          snapshot_id: snapshot?.id,
+          treasurer_name: treasurerName,
+          president_name: presidentName,
+          reviewer_name: reviewerName,
+          opening_balance: openingBalance,
+          expected_closing_balance: expectedClosingBalance,
+          row_capacity: 40,
+        }),
+      });
+      setJob(created);
+      const finished = await waitForJob(created.job_id, created.package_id);
+      const pkg = await request<any>(`/packages/${created.package_id}`);
+      setPackageData(pkg);
+      return finished;
+    });
+  }
+
   const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
     { id: "ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
     { id: "package", label: "동연 패키지", icon: <FileArchive size={17} /> },
@@ -526,8 +588,8 @@ function App() {
 
           {activeTab === "package" && <>
             <section className="section-head"><div><p className="eyebrow">SUBMISSION PACKAGE</p><h2>동아리연합회 제출본</h2><p>생성, 검토 요청, 승인 이력을 버전 단위로 보존합니다.</p></div>{packageData && <StatusBadge value={packageData.status} />}</section>
-            <section className="workspace-grid"><div className="panel"><h3>서명 정보</h3><div className="form-grid"><label>회계담당자<input value={treasurerName} onChange={(e) => setTreasurerName(e.target.value)} /></label><label>회장<input value={presidentName} onChange={(e) => setPresidentName(e.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(e) => setReviewerName(e.target.value)} /></label></div></div><div className="panel"><h3>현재 작업</h3>{job ? <div className="job-state"><RefreshCw className={job.status === "running" ? "spin" : ""} size={20} /><div><strong>{job.status}</strong><span>{job.id}</span></div></div> : <p className="muted">생성 요청 전입니다.</p>}{packageData?.validation && <div className="validation-line"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div>}{packageData?.document_coverage && <div className="coverage-grid"><span>장부 <strong>{packageData.document_coverage.ledger_transaction_rows}건 / {packageData.document_coverage.ledger_row_capacity}칸</strong></span><span>증빙 삽입 <strong>{packageData.document_coverage.evidence_document.embedded_files}개</strong></span><span>계좌 캡처 <strong>{packageData.document_coverage.account_document.embedded_capture_pages}쪽</strong></span><span>은행 거래 <strong>{packageData.document_coverage.account_document.bank_transaction_rows}건</strong></span></div>}</div></section>
-            <div className="action-bar"><button disabled={!jsonValid || !!busy} onClick={async () => { await run("패키지 생성", async () => { const created: any = await request("/packages/submission", { method: "POST", body: JSON.stringify({ ...snapshotPayload, club_name: clubName, semester, snapshot_id: snapshot?.id, treasurer_name: treasurerName, president_name: presidentName, reviewer_name: reviewerName, opening_balance: openingBalance, expected_closing_balance: expectedClosingBalance, row_capacity: 40 }) }); setJob(created); const finished = await waitForJob(created.job_id); const pkg = await request<any>(`/packages/${created.package_id}`); setPackageData(pkg); return finished; }); }}><FileArchive size={17} /> 패키지 생성</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button></div>
+            <section className="workspace-grid"><div className="panel"><h3>서명 정보</h3><div className="form-grid"><label>회계담당자<input value={treasurerName} onChange={(e) => setTreasurerName(e.target.value)} /></label><label>회장<input value={presidentName} onChange={(e) => setPresidentName(e.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(e) => setReviewerName(e.target.value)} /></label></div></div><div className="panel"><h3>현재 작업</h3>{job ? <div className="job-state"><RefreshCw className={job.status === "running" ? "spin" : ""} size={20} /><div><strong>{job.status}</strong><span>{jobIdOf(job)}</span></div></div> : <p className="muted">생성 요청 전입니다.</p>}{packageData?.validation && <div className="validation-line"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div>}{packageData?.document_coverage && <div className="coverage-grid"><span>장부 <strong>{packageData.document_coverage.ledger_transaction_rows}건 / {packageData.document_coverage.ledger_row_capacity}칸</strong></span><span>증빙 삽입 <strong>{packageData.document_coverage.evidence_document.embedded_files}개</strong></span><span>계좌 캡처 <strong>{packageData.document_coverage.account_document.embedded_capture_pages}쪽</strong></span><span>은행 거래 <strong>{packageData.document_coverage.account_document.bank_transaction_rows}건</strong></span></div>}</div></section>
+            <div className="action-bar"><button disabled={!jsonValid || !!busy} onClick={createPackageJob}><FileArchive size={17} /> 패키지 생성</button><button className="secondary" disabled={!jobIdOf(job) || !!busy} onClick={refreshCurrentJob}><RefreshCw size={17} /> 상태 확인</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button></div>
             {packageData?.zip_sha256 && <section className="integrity"><ShieldCheck size={20} /><div><strong>ZIP 무결성</strong><code>{packageData.zip_sha256}</code></div></section>}
           </>}
 
