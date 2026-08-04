@@ -82,6 +82,8 @@ class WorkbookServiceTest(unittest.TestCase):
 
             ledger = parse_aegis_ledger(ledger_path, period="2026년 1학기")
             bank = parse_toss_bank(bank_path)
+            self.assertEqual(ledger["transactions"][1]["processing_method"], "카드결제")
+            self.assertEqual(ledger["transactions"][1]["details"], "결제처: 테스트상점")
             reconciliation = reconcile_ledger_bank({**ledger, "transactions": ledger["transactions"][:2]}, bank)
             self.assertEqual(reconciliation["status"], "PASS")
             self.assertEqual(reconciliation["balance_delta"], 0)

@@ -27,6 +27,8 @@ class Transaction:
     period: str | None = None
     category: str = "미분류"
     counterparty: str | None = None
+    processing_method: str = ""
+    details: str = ""
     evidence_ids: tuple[str, ...] = ()
     source_row_hash: str | None = None
 
@@ -112,6 +114,8 @@ def normalize_transactions(rows: Iterable[dict]) -> list[Transaction]:
                 period=row.get("period"),
                 category=str(row.get("category") or "미분류"),
                 counterparty=row.get("counterparty"),
+                processing_method=str(row.get("processing_method") or ""),
+                details=str(row.get("details") or ""),
                 evidence_ids=tuple(evidence_ids),
                 source_row_hash=row_hash,
             )

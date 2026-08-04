@@ -238,11 +238,14 @@ class ApiWorkflowTest(unittest.TestCase):
             "goog",
         )
         sheet_values = {
-            "range": "A:G",
+            "range": "1학기!B:I",
             "values": [
-                ["번호", "날짜", "내용", "수입금액", "지출금액", "잔액", "비고"],
-                [1, "2026-03-01", "회비", 100000, 0, 1100000, ""],
-                [2, "2026-03-02", "현수막", 0, 20000, 1080000, "영수증"],
+                [],
+                ["2026년 Aegis 회계장부"],
+                [],
+                ["No", "날짜", "내용", "수입", "지출", "잔액", "처리방식", "상세정보"],
+                [1, "2026-03-01", "회비", 100000, 0, 1100000, "계좌이체", "입금자명: 회원"],
+                [2, "2026-03-02", "현수막", 0, 20000, 1080000, "카드결제", "결제처: 테스트상점"],
             ],
         }
         with patch("app.main.get_sheet_values", return_value=sheet_values) as values_mock:
@@ -251,7 +254,7 @@ class ApiWorkflowTest(unittest.TestCase):
                 headers=self.headers,
                 json={
                     "spreadsheet_url_or_id": "https://example.test/spreadsheets/d/test-ledger-sheet-id-1234567890/edit",
-                    "range": "A:G",
+                    "range": "B:I",
                     "period": "2026년 1학기",
                     "period_start": "2026-03-01",
                     "period_end": "2026-06-30",
@@ -264,7 +267,10 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(imported["source"]["spreadsheet_id"], "test-ledger-sheet-id-1234567890")
         self.assertEqual(imported["transaction_count"], 2)
         self.assertEqual(imported["transactions"][1]["description"], "현수막")
-        values_mock.assert_called_once_with("access-token", "test-ledger-sheet-id-1234567890", "A:G")
+        self.assertEqual(imported["transactions"][1]["processing_method"], "카드결제")
+        self.assertEqual(imported["transactions"][1]["details"], "결제처: 테스트상점")
+        self.assertEqual(imported["transactions"][1]["source_row"], "6")
+        values_mock.assert_called_once_with("access-token", "test-ledger-sheet-id-1234567890", "B:I")
 
     def test_google_service_disabled_error_is_human_readable(self) -> None:
         detail = {

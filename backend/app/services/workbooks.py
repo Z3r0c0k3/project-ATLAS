@@ -199,6 +199,8 @@ def parse_aegis_ledger(
             "balance": running_balance,
             "category": _category(description, method),
             "counterparty": _counterparty(detail),
+            "processing_method": method,
+            "details": detail,
             "note": note,
             "source_row": source_row,
         }

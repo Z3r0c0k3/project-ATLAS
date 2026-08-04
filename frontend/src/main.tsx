@@ -36,6 +36,8 @@ type TransactionInput = {
   expense: number;
   balance: number;
   category?: string;
+  processing_method?: string;
+  details?: string;
   note?: string;
   evidence_ids?: string[];
 };
@@ -184,12 +186,14 @@ function App() {
     expense: 0,
     balance: 1080400,
     category: "미분류",
+    processing_method: "",
+    details: "",
     note: "",
     evidence_ids: [],
   });
   const [googleConnection, setGoogleConnection] = useState<any>(null);
   const [googleSheetSource, setGoogleSheetSource] = useState("");
-  const [googleSheetRange, setGoogleSheetRange] = useState("A:G");
+  const [googleSheetRange, setGoogleSheetRange] = useState("B:I");
   const [snapshot, setSnapshot] = useState<any>(null);
   const [packageData, setPackageData] = useState<any>(null);
   const [job, setJob] = useState<any>(null);
@@ -229,6 +233,8 @@ function App() {
       expense: 0,
       balance: Number(last?.balance ?? openingBalance),
       category: "미분류",
+      processing_method: "",
+      details: "",
       note: "",
       evidence_ids: [],
     });
@@ -239,6 +245,8 @@ function App() {
     setTransactionDraft({
       ...row,
       category: row.category || "미분류",
+      processing_method: row.processing_method || "",
+      details: row.details || "",
       note: row.note || "",
       evidence_ids: row.evidence_ids || [],
     });
@@ -349,6 +357,8 @@ function App() {
       expense: Number(transactionDraft.expense || 0),
       balance: Number(transactionDraft.balance || 0),
       category: transactionDraft.category || "미분류",
+      processing_method: transactionDraft.processing_method || "",
+      details: transactionDraft.details || "",
       note: transactionDraft.note || "",
       evidence_ids: transactionDraft.evidence_ids || [],
     };
@@ -473,7 +483,7 @@ function App() {
       method: "POST",
       body: JSON.stringify({
         spreadsheet_url_or_id: googleSheetSource.trim(),
-        range: googleSheetRange.trim() || "A:G",
+        range: googleSheetRange.trim() || "B:I",
         period: semester,
         period_start: periodStart || null,
         period_end: periodEnd || null,
@@ -586,7 +596,7 @@ function App() {
                 <p className="muted">{googleConnection?.connected ? `${googleConnection.account_email} · 읽기 전용 연결` : "운영 계정의 Sheets 장부와 Drive 증빙을 읽기 전용으로 연결합니다."}</p>
                 <div className="form-grid single google-import-form">
                   <label>회계장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
-                  <label>가져올 범위<input value={googleSheetRange} onChange={(event) => setGoogleSheetRange(event.target.value)} placeholder="A:G 또는 시트명!A:G" /></label>
+                  <label>가져올 범위<input value={googleSheetRange} onChange={(event) => setGoogleSheetRange(event.target.value)} placeholder="B:I 또는 시트명!B:I" /></label>
                 </div>
                 <div className="button-row">
                   {googleConnection?.connected ? <button className="secondary danger" onClick={disconnectGoogle}>연결 해제</button> : <button onClick={beginGoogleConnect}>Google 계정 연결</button>}
@@ -618,15 +628,17 @@ function App() {
                   <label>수입<input type="number" value={transactionDraft.income} onChange={(event) => setTransactionDraft({ ...transactionDraft, income: Number(event.target.value) })} /></label>
                   <label>지출<input type="number" value={transactionDraft.expense} onChange={(event) => setTransactionDraft({ ...transactionDraft, expense: Number(event.target.value) })} /></label>
                   <label>잔액<input type="number" value={transactionDraft.balance} onChange={(event) => setTransactionDraft({ ...transactionDraft, balance: Number(event.target.value) })} /></label>
-                  <label className="wide-field">비고<input value={transactionDraft.note || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, note: event.target.value })} /></label>
+                  <label>처리방식<select value={transactionDraft.processing_method || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, processing_method: event.target.value })}><option value="">선택 안 함</option><option value="계좌이체">계좌이체</option><option value="카드결제">카드결제</option><option value="카드결제취소">카드결제취소</option><option value="이자입금">이자입금</option><option value="이자입금취소">이자입금취소</option></select></label>
+                  <label className="wide-field">상세정보<input value={transactionDraft.details || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, details: event.target.value })} /></label>
+                  <label className="wide-field">내부 비고<input value={transactionDraft.note || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, note: event.target.value })} /></label>
                 </div>
                 <div className="button-row"><button onClick={saveTransactionDraft} disabled={!!busy}><Save size={17} /> {editingTransactionKey ? "수정 저장" : "거래 추가"}</button><button className="secondary" onClick={() => resetTransactionDraft()} disabled={!!busy}>초기화</button></div>
               </div>
               <div className="table-wrap ledger-table-wrap">
                 <h3>거래 목록</h3>
                 <table>
-                  <thead><tr><th>번호</th><th>날짜</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>증빙</th><th></th></tr></thead>
-                  <tbody>{transactions.map((row) => <tr key={row.transaction_id || row.number}><td>{row.number}</td><td>{row.date}</td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
+                  <thead><tr><th>번호</th><th>날짜</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>처리방식</th><th>상세정보</th><th>증빙</th><th></th></tr></thead>
+                  <tbody>{transactions.map((row) => <tr key={row.transaction_id || row.number}><td>{row.number}</td><td>{row.date}</td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
                 </table>
               </div>
             </section>

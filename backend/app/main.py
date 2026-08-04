@@ -301,7 +301,23 @@ def raise_google_http_error(exc: GoogleApiError) -> None:
 def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> list[dict]:
     if not values:
         return []
-    rows = values[1:] if any(str(value) in {"번호", "날짜", "내용"} for value in values[0]) else values
+
+    def is_ledger_header(row: list[Any]) -> bool:
+        labels = {str(value).strip().upper() for value in row}
+        return (
+            bool(labels & {"NO", "번호"})
+            and "날짜" in labels
+            and "내용" in labels
+            and bool(labels & {"수입", "수입금액"})
+            and bool(labels & {"지출", "지출금액"})
+        )
+
+    header_index = next(
+        (index for index, row in enumerate(values[:60]) if is_ledger_header(row)),
+        None,
+    )
+    rows = values[header_index + 1 :] if header_index is not None else values
+    source_row_offset = header_index + 2 if header_index is not None else 1
 
     def number(value: Any) -> int:
         if value in (None, ""):
@@ -311,11 +327,13 @@ def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> li
     parsed: list[dict] = []
     running = opening_balance
     for index, row in enumerate(rows, 1):
-        padded = list(row) + [None] * (7 - len(row))
-        if not any(value not in (None, "") for value in padded[:7]):
+        padded = list(row) + [None] * (8 - len(row))
+        if not any(value not in (None, "") for value in padded[:8]):
             continue
         income, expense = number(padded[3]), number(padded[4])
         running = number(padded[5]) if padded[5] not in (None, "") else running + income - expense
+        processing_method = str(padded[6] or "").strip()
+        details = str(padded[7] or "").strip()
         parsed.append(
             {
                 "number": number(padded[0]) or index,
@@ -324,8 +342,11 @@ def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> li
                 "income": income,
                 "expense": expense,
                 "balance": running,
-                "note": str(padded[6] or ""),
-                "source_row": str(index + 1),
+                "category": "미분류",
+                "processing_method": processing_method,
+                "details": details,
+                "note": " / ".join(value for value in (processing_method, details) if value),
+                "source_row": str(source_row_offset + index - 1),
             }
         )
     return parsed

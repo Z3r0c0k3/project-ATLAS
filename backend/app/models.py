@@ -49,6 +49,8 @@ class TransactionInput(BaseModel):
     balance: int
     category: str = "미분류"
     counterparty: str | None = None
+    processing_method: str = ""
+    details: str = ""
     note: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     evidence_id: str | None = None
@@ -116,6 +118,8 @@ class TransactionPatchRequest(BaseModel):
     balance: int | None = None
     category: str | None = None
     counterparty: str | None = None
+    processing_method: str | None = None
+    details: str | None = None
     note: str | None = None
     evidence_ids: list[str] | None = None
     evidence_id: str | None = None
@@ -201,7 +205,7 @@ class DiscordMessageResponse(BaseModel):
 
 
 class GoogleSheetSnapshotRequest(BaseModel):
-    range: str = "A:G"
+    range: str = "B:I"
     period: str
     period_start: str | None = None
     period_end: str | None = None
