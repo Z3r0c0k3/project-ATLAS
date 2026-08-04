@@ -7,6 +7,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .naming import normalize_file_record_names
+
 
 GOOGLE_SHEETS_SCOPES = [
     "openid",
@@ -162,7 +164,7 @@ def list_spreadsheets(access_token: str) -> list[dict]:
             "pageSize": 100,
         },
     )
-    return result.get("files", [])
+    return normalize_file_record_names(result.get("files", []))
 
 
 def list_drive_files(access_token: str) -> list[dict]:
@@ -176,7 +178,7 @@ def list_drive_files(access_token: str) -> list[dict]:
             "pageSize": 100,
         },
     )
-    return result.get("files", [])
+    return normalize_file_record_names(result.get("files", []))
 
 
 def get_sheet_values(access_token: str, spreadsheet_id: str, range_name: str) -> dict:

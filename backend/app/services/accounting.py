@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from typing import Iterable
 
+from .naming import normalize_filename
+
 from .integrity import canonical_sha256
 
 
@@ -128,7 +130,7 @@ def normalize_evidence(rows: Iterable[dict]) -> list[Evidence]:
         Evidence(
             id=str(row["id"]),
             transaction_number=row.get("transaction_number"),
-            filename=str(row["filename"]),
+            filename=normalize_filename(str(row["filename"])),
             kind=str(row.get("kind") or "other"),
             account_id=str(row.get("account_id") or "primary"),
             url=row.get("url"),

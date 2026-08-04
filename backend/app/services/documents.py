@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +25,7 @@ from .accounting import (
 )
 from .integrity import canonical_sha256, file_sha256
 from .media import image_dimensions, render_media_pages
+from .naming import normalize_filename, normalize_nfc, normalize_relative_path
 
 
 TEMPLATE_VERSION = "atlas-documents-v1.3-official-template-fill"
@@ -52,7 +52,7 @@ def _effective_row_capacity(requested: int, transaction_count: int) -> int:
 
 
 def _normalized(value: str) -> str:
-    return unicodedata.normalize("NFC", value)
+    return normalize_nfc(value)
 
 
 def _official_template_dir() -> Path:
@@ -535,13 +535,14 @@ def build_submission_package(
     evidence_dir.mkdir(exist_ok=True)
     for item in evidence:
         if item.local_path and Path(item.local_path).exists():
-            target = evidence_dir / f"{item.id}_{Path(item.local_path).name}"
+            source_path = Path(item.local_path)
+            target = evidence_dir / f"{item.id}_{normalize_filename(item.filename or source_path.name)}"
             shutil.copy2(item.local_path, target)
             copied_evidence.append(
                 {
                     "id": item.id,
-                    "filename": target.name,
-                    "relative_path": str(target.relative_to(package_dir)),
+                    "filename": normalize_filename(target.name),
+                    "relative_path": normalize_relative_path(target.relative_to(package_dir)),
                     "sha256": file_sha256(target),
                     "transaction_ids": list(item.transaction_ids),
                     "transaction_number": item.transaction_number,
@@ -555,13 +556,14 @@ def build_submission_package(
         source_path = Path(str(item.get("local_path") or ""))
         if not source_path.exists():
             continue
-        target = source_dir / f"{item.get('kind', 'source')}_{source_path.name}"
+        source_filename = normalize_filename(str(item.get("filename") or source_path.name))
+        target = source_dir / f"{item.get('kind', 'source')}_{source_filename}"
         shutil.copy2(source_path, target)
         copied_sources.append(
             {
                 "kind": item.get("kind", "source"),
-                "filename": target.name,
-                "relative_path": str(target.relative_to(package_dir)),
+                "filename": normalize_filename(target.name),
+                "relative_path": normalize_relative_path(target.relative_to(package_dir)),
                 "sha256": file_sha256(target),
             }
         )
@@ -569,7 +571,7 @@ def build_submission_package(
     generated_paths = [ledger_path, evidence_path, captures_path, report_path]
     file_entries = [
         {
-            "relative_path": str(path.relative_to(package_dir)),
+            "relative_path": normalize_relative_path(path.relative_to(package_dir)),
             "size": path.stat().st_size,
             "sha256": file_sha256(path),
         }
@@ -624,7 +626,7 @@ def build_submission_package(
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in package_dir.rglob("*"):
             if path.is_file():
-                archive.write(path, path.relative_to(package_dir))
+                archive.write(path, normalize_relative_path(path.relative_to(package_dir)))
 
     zip_hash = file_sha256(zip_path)
     manifest_hash = file_sha256(manifest_path)

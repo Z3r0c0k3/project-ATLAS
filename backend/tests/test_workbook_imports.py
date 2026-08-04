@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import unicodedata
 import unittest
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -90,7 +92,7 @@ class WorkbookServiceTest(unittest.TestCase):
 
             transactions = [Transaction(**item) for item in ledger["transactions"]]
             evidence = [
-                Evidence("receipt", 2, receipt_path.name, "receipt", local_path=str(receipt_path)),
+                Evidence("receipt", 2, unicodedata.normalize("NFD", "2_영수증.png"), "receipt", local_path=str(receipt_path)),
                 Evidence("explanation", 3, explanation_path.name, "explanation", local_path=str(explanation_path)),
                 Evidence("capture", None, capture_path.name, "account_capture", local_path=str(capture_path)),
             ]
@@ -108,7 +110,13 @@ class WorkbookServiceTest(unittest.TestCase):
                 evidence,
                 40,
                 bank_transactions=bank["transactions"],
-                source_files=[{"kind": "ledger_workbook", "local_path": str(ledger_path)}],
+                source_files=[
+                    {
+                        "kind": "ledger_workbook",
+                        "filename": unicodedata.normalize("NFD", "원본 장부.xlsx"),
+                        "local_path": str(ledger_path),
+                    }
+                ],
             )
             package_dir = root / "outputs" / "pkg-test"
             output_workbook = load_workbook(package_dir / "수입지출관리대장.xlsx", data_only=False)
@@ -132,6 +140,11 @@ class WorkbookServiceTest(unittest.TestCase):
             self.assertIn("80칸", result["document_coverage"]["ledger_template"]["template_filename"])
             self.assertEqual(result["document_coverage"]["copied_evidence_files"], 3)
             self.assertEqual(result["document_coverage"]["copied_source_files"], 1)
+            with zipfile.ZipFile(result["zip_path"]) as archive:
+                archived_names = archive.namelist()
+            self.assertTrue(all(unicodedata.is_normalized("NFC", name) for name in archived_names))
+            self.assertIn("증빙자료/receipt_2_영수증.png", archived_names)
+            self.assertIn("원본자료/ledger_workbook_원본 장부.xlsx", archived_names)
 
 
 class WorkbookApiTest(unittest.TestCase):
@@ -165,12 +178,14 @@ class WorkbookApiTest(unittest.TestCase):
         make_ledger(ledger_path)
         make_bank(bank_path)
         Image.new("RGB", (400, 300), "white").save(receipt_path)
+        nfd_ledger_filename = unicodedata.normalize("NFD", "Aegis 회계장부.xlsx")
+        nfd_evidence_filename = unicodedata.normalize("NFD", "#2# 영수증.png")
 
         with ledger_path.open("rb") as stream:
             ledger_upload = self.client.post(
                 "/imports/upload",
                 headers=self.headers,
-                files={"file": (ledger_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                files={"file": (nfd_ledger_filename, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
             )
         with bank_path.open("rb") as stream:
             bank_upload = self.client.post(
@@ -179,6 +194,8 @@ class WorkbookApiTest(unittest.TestCase):
                 files={"file": (bank_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
             )
         self.assertEqual(ledger_upload.json()["detected_type"], "aegis_ledger")
+        self.assertEqual(ledger_upload.json()["filename"], "Aegis 회계장부.xlsx")
+        self.assertTrue(unicodedata.is_normalized("NFC", ledger_upload.json()["filename"]))
         self.assertEqual(bank_upload.json()["detected_type"], "toss_bank")
 
         imported = self.client.post(
@@ -198,9 +215,14 @@ class WorkbookApiTest(unittest.TestCase):
             evidence = self.client.post(
                 "/evidence/upload",
                 headers=self.headers,
-                data={"kind": "receipt", "transaction_number": "2", "amount": "200", "evidence_date": "2026-03-02"},
-                files={"file": (receipt_path.name, stream, "image/png")},
+                data={"kind": "receipt", "amount": "200", "evidence_date": "2026-03-02"},
+                files={"file": (nfd_evidence_filename, stream, "image/png")},
             )
+        self.assertEqual(evidence.json()["filename"], "#2# 영수증.png")
+        self.assertEqual(evidence.json()["transaction_number"], 2)
+        self.assertTrue(unicodedata.is_normalized("NFC", evidence.json()["filename"]))
+        listed_evidence = self.client.get("/evidence", headers=self.headers).json()
+        self.assertEqual(listed_evidence[0]["filename"], "#2# 영수증.png")
         attached = self.client.post(
             f"/ledger-snapshots/{imported.json()['id']}/evidence",
             headers=self.headers,

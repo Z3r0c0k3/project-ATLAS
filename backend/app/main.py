@@ -55,6 +55,7 @@ from .services.google import (
 )
 from .services.integrity import canonical_sha256, file_sha256
 from .services.jobs import JobRunner
+from .services.naming import normalize_filename
 from .services.security import SecretBox, mask_webhook_url, sanitize_secret_fields
 from .services.store import JsonStore, utc_now
 from .services.workbooks import (
@@ -195,7 +196,7 @@ def snapshot_summary(snapshot: dict) -> dict:
 
 
 def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None, str, str | None]:
-    stem = Path(filename).stem
+    stem = Path(normalize_filename(filename)).stem
     dues = re.search(r"^\s*\*\s*(\d{1,6})\s*\*", stem)
     if dues:
         return int(dues.group(1)), "filename_dues_star_id", "dues_intake"
@@ -426,7 +427,7 @@ def create_google_sheet_snapshot(spreadsheet_id: str, payload: GoogleSheetSnapsh
 
 def persist_upload(file: UploadFile, folder: str = "imports") -> tuple[Path, int]:
     upload_id = f"upload_{secrets.token_urlsafe(8)}"
-    filename = Path(file.filename or "upload.bin").name
+    filename = normalize_filename(file.filename)
     target = UPLOAD_ROOT / folder / upload_id / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     size = 0
@@ -666,7 +667,7 @@ def upload_import(
     row = store.insert(
         "uploads",
         {
-            "filename": target.name,
+            "filename": normalize_filename(target.name),
             "content_type": file.content_type,
             "size": size,
             "sha256": file_sha256(target),
@@ -711,7 +712,7 @@ def upload_evidence(
             "match_method": match_method,
             "match_confidence": "confirmed" if inferred_number is not None else "unmatched",
             "transaction_ids": [value.strip() for value in transaction_ids.split(",") if value.strip()],
-            "filename": target.name,
+            "filename": normalize_filename(target.name),
             "kind": kind,
             "mime_type": file.content_type,
             "size": size,
@@ -732,7 +733,10 @@ def upload_evidence(
 def list_evidence(
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
 ) -> list[dict]:
-    return list(reversed(list(store.read_collection("evidence").values())))
+    return [
+        {**item, "filename": normalize_filename(item.get("filename"))}
+        for item in reversed(list(store.read_collection("evidence").values()))
+    ]
 
 
 @app.post("/imports/workbook-snapshot")
@@ -786,7 +790,7 @@ def create_workbook_snapshot(
     source_files = [
         {
             "kind": "ledger_workbook",
-            "filename": ledger_upload["filename"],
+            "filename": normalize_filename(ledger_upload["filename"]),
             "local_path": ledger_upload["path"],
             "sha256": ledger_upload["sha256"],
         }
@@ -795,7 +799,7 @@ def create_workbook_snapshot(
         source_files.append(
             {
                 "kind": "bank_workbook",
-                "filename": bank_upload["filename"],
+                "filename": normalize_filename(bank_upload["filename"]),
                 "local_path": bank_upload["path"],
                 "sha256": bank_upload["sha256"],
             }

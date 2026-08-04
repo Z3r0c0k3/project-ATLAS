@@ -5,6 +5,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from .naming import normalize_nfc
+
 try:
     from pillow_heif import register_heif_opener
 except ImportError:
@@ -17,7 +19,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".we
 
 def render_media_pages(source: Path, output_dir: Path, max_pages: int = 100) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(normalize_nfc(str(source)).encode("utf-8")).hexdigest()[:12]
     suffix = source.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         target = output_dir / f"{digest}-001.png"

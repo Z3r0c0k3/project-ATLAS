@@ -9,6 +9,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from .integrity import canonical_sha256, file_sha256
+from .naming import normalize_filename
 
 
 class WorkbookParseError(ValueError):
@@ -84,7 +85,7 @@ def _open(path: Path):
     try:
         return load_workbook(path, data_only=True, read_only=False)
     except Exception as exc:
-        raise WorkbookParseError(f"Excel 파일을 열 수 없습니다: {path.name}") from exc
+        raise WorkbookParseError(f"Excel 파일을 열 수 없습니다: {normalize_filename(path.name)}") from exc
 
 
 def detect_workbook(path: Path) -> dict:
@@ -212,7 +213,7 @@ def parse_aegis_ledger(
         raise WorkbookParseError("장부에서 유효한 거래 행을 찾지 못했습니다.")
     return {
         "kind": "aegis_ledger",
-        "filename": path.name,
+        "filename": normalize_filename(path.name),
         "sha256": file_sha256(path),
         "sheet_name": selected.title,
         "header_row": header_row,
@@ -280,7 +281,7 @@ def parse_toss_bank(path: Path) -> dict:
             )
     return {
         "kind": "toss_bank",
-        "filename": path.name,
+        "filename": normalize_filename(path.name),
         "sha256": file_sha256(path),
         "sheet_name": selected.title,
         "header_row": header_row,
