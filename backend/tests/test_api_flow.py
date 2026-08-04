@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import time
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import app.main as main
+from app.services.google import _format_google_http_error
 from app.services.jobs import JobRunner
 from app.services.store import JsonStore
 
@@ -223,6 +225,29 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(checks["sheets_list"]["count"], 1)
         self.assertEqual(checks["drive_files_list"]["status"], "ok")
         self.assertEqual(checks["drive_files_list"]["count"], 1)
+
+    def test_google_service_disabled_error_is_human_readable(self) -> None:
+        detail = {
+            "error": {
+                "code": 403,
+                "message": "Google Drive API has not been used in project 13429015435 before or it is disabled.",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "SERVICE_DISABLED",
+                        "metadata": {
+                            "serviceTitle": "Google Drive API",
+                            "activationUrl": "https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=13429015435",
+                        },
+                    }
+                ],
+            }
+        }
+
+        message = _format_google_http_error(403, json.dumps(detail), "Google API request failed")
+
+        self.assertIn("Google Drive API is disabled", message)
+        self.assertIn("project=13429015435", message)
 
     def test_evidence_filename_hash_id_matching_ignores_receipt_dates(self) -> None:
         dated = main.evidence_transaction_number_from_filename("2026. 3. 1. 세미나 영수증.pdf")

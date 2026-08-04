@@ -169,6 +169,14 @@ Google OAuth 리디렉션 URI가 아니라 API 호출과 CORS 대상이다.
 ATLAS는 계정 이메일과 읽기 전용 Sheets/Drive Scope만 요청하며 OAuth `state`는
 로그인 세션에 묶고 한 번 사용하면 폐기한다.
 
+OAuth 클라이언트가 속한 Google Cloud 프로젝트에서는 다음 API를 반드시 활성화한다.
+
+- Google Drive API: Sheets 파일 목록 조회와 Drive 증빙자료 조회에 사용
+- Google Sheets API: 선택한 스프레드시트 값 읽기에 사용
+
+`Google Drive API has not been used ... or it is disabled` 오류가 나오면 해당 프로젝트의
+Google Drive API를 Enable하고 몇 분 뒤 다시 시도한다.
+
 승인된 JavaScript 원본에는 `http://localhost:5173`와 `https://<ATLAS_DOMAIN>`을
 등록한다. Google 계정 연결은 성공했는데 Sheets/Drive 버튼에서 502가 뜬다면
 리디렉션 URI보다 Cloudflare Tunnel의 `api.<도메인>` 라우팅과 백엔드 컨테이너 상태를

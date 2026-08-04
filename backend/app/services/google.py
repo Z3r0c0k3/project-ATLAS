@@ -22,6 +22,24 @@ class GoogleApiError(RuntimeError):
         self.status_code = status_code
 
 
+def _format_google_http_error(status_code: int, detail: str, prefix: str) -> str:
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        return f"{prefix}: {status_code} {detail}"
+    error = payload.get("error") or {}
+    details = error.get("details") or []
+    for item in details:
+        if item.get("@type") == "type.googleapis.com/google.rpc.ErrorInfo" and item.get("reason") == "SERVICE_DISABLED":
+            metadata = item.get("metadata") or {}
+            service_title = metadata.get("serviceTitle") or metadata.get("service") or "Google API"
+            activation_url = metadata.get("activationUrl")
+            message = f"{service_title} is disabled for this Google Cloud project. Enable it in Google Cloud Console."
+            return f"{message} {activation_url}" if activation_url else message
+    message = error.get("message")
+    return f"{prefix}: {status_code} {message or detail}"
+
+
 def google_connection_status(connection: dict | None) -> dict:
     if not connection or connection.get("disconnected_at") or not (
         connection.get("encrypted_access_token") or connection.get("encrypted_refresh_token")
@@ -76,7 +94,7 @@ def _token_request(payload: dict) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise GoogleApiError(f"Google OAuth request failed: {exc.code} {detail}", exc.code) from exc
+        raise GoogleApiError(_format_google_http_error(exc.code, detail, "Google OAuth request failed"), exc.code) from exc
     except urllib.error.URLError as exc:
         raise GoogleApiError(f"Google OAuth connection failed: {exc.reason}") from exc
 
@@ -124,7 +142,7 @@ def _api_get(url: str, access_token: str, params: dict | None = None) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise GoogleApiError(f"Google API request failed: {exc.code} {detail}", exc.code) from exc
+        raise GoogleApiError(_format_google_http_error(exc.code, detail, "Google API request failed"), exc.code) from exc
     except urllib.error.URLError as exc:
         raise GoogleApiError(f"Google API connection failed: {exc.reason}") from exc
     except (TimeoutError, socket.timeout) as exc:
