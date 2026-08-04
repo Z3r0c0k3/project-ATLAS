@@ -179,9 +179,11 @@ class ApiWorkflowTest(unittest.TestCase):
     def test_evidence_filename_hash_id_matching_ignores_receipt_dates(self) -> None:
         dated = main.evidence_transaction_number_from_filename("2026. 3. 1. 세미나 영수증.pdf")
         explicit = main.evidence_transaction_number_from_filename("#42# 2026. 3. 1. 세미나 영수증.pdf")
+        dues = main.evidence_transaction_number_from_filename("*42* 2026. 3. 1. 회비 환불 소명.pdf")
 
-        self.assertEqual(dated, (None, "unmatched"))
-        self.assertEqual(explicit, (42, "filename_hash_id"))
+        self.assertEqual(dated, (None, "unmatched", None))
+        self.assertEqual(explicit, (42, "filename_hash_id", None))
+        self.assertEqual(dues, (42, "filename_dues_star_id", "dues_intake"))
 
     def test_transaction_crud_creates_snapshot_revisions(self) -> None:
         snapshot = self.client.post(

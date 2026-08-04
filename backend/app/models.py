@@ -60,6 +60,7 @@ class EvidenceInput(BaseModel):
     id: str
     transaction_ids: list[str] = Field(default_factory=list)
     transaction_number: int | None = None
+    account_id: str = "primary"
     drive_file_id: str | None = None
     filename: str
     mime_type: str | None = None

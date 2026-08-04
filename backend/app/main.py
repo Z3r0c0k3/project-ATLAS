@@ -192,15 +192,18 @@ def snapshot_summary(snapshot: dict) -> dict:
     }
 
 
-def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None, str]:
+def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None, str, str | None]:
     stem = Path(filename).stem
+    dues = re.search(r"^\s*\*\s*(\d{1,6})\s*\*", stem)
+    if dues:
+        return int(dues.group(1)), "filename_dues_star_id", "dues_intake"
     explicit = re.search(r"#\s*(\d{1,6})\s*#", stem)
     if explicit:
-        return int(explicit.group(1)), "filename_hash_id"
+        return int(explicit.group(1)), "filename_hash_id", None
     labeled = re.search(r"(?:^|[ _-])(?:no|tx|ledger|장부)[ ._#-]*(\d{1,6})(?:[ ._#-]|$)", stem, re.IGNORECASE)
     if labeled:
-        return int(labeled.group(1)), "filename_labeled_id"
-    return None, "unmatched"
+        return int(labeled.group(1)), "filename_labeled_id", None
+    return None, "unmatched", None
 
 
 def create_snapshot_revision(
@@ -538,6 +541,7 @@ def upload_evidence(
     request: Request,
     file: UploadFile = File(...),
     kind: str = Form("other"),
+    account_id: str | None = Form(None),
     transaction_number: int | None = Form(None),
     transaction_ids: str = Form(""),
     amount: int | None = Form(None),
@@ -548,13 +552,17 @@ def upload_evidence(
         raise HTTPException(status_code=422, detail="Unsupported evidence kind")
     target, size = persist_upload(file, "evidence")
     inferred_number = transaction_number
+    inferred_account_id = account_id or "primary"
     match_method = "manual" if transaction_number is not None else "unmatched"
     if inferred_number is None:
-        inferred_number, match_method = evidence_transaction_number_from_filename(target.name)
+        inferred_number, match_method, account_hint = evidence_transaction_number_from_filename(target.name)
+        if account_hint and not account_id:
+            inferred_account_id = account_hint
     row = store.insert(
         "evidence",
         {
             "transaction_number": inferred_number,
+            "account_id": inferred_account_id,
             "match_method": match_method,
             "match_confidence": "confirmed" if inferred_number is not None else "unmatched",
             "transaction_ids": [value.strip() for value in transaction_ids.split(",") if value.strip()],

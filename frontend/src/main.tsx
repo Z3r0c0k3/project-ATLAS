@@ -42,6 +42,7 @@ type TransactionInput = {
 type EvidenceInput = {
   id: string;
   transaction_number?: number;
+  account_id?: "primary" | "dues_intake" | string;
   filename: string;
   kind: "receipt" | "explanation" | "account_capture" | "other";
   accessible?: boolean;
@@ -171,6 +172,7 @@ function App() {
   const [bankUpload, setBankUpload] = useState<any>(null);
   const [evidenceUploads, setEvidenceUploads] = useState<any[]>([]);
   const [evidenceKind, setEvidenceKind] = useState<EvidenceInput["kind"]>("receipt");
+  const [evidenceAccountId, setEvidenceAccountId] = useState("primary");
   const [evidenceTransactionNumber, setEvidenceTransactionNumber] = useState("");
   const [editingTransactionKey, setEditingTransactionKey] = useState("");
   const [transactionDraft, setTransactionDraft] = useState<TransactionInput>({
@@ -381,6 +383,7 @@ function App() {
         const form = new FormData();
         form.append("file", file);
         form.append("kind", evidenceKind);
+        form.append("account_id", evidenceAccountId);
         if (evidenceTransactionNumber) form.append("transaction_number", evidenceTransactionNumber);
         uploaded.push(await uploadForm("/evidence/upload", form));
       }
@@ -490,7 +493,7 @@ function App() {
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
                 <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 거래내역</span><small>{bankUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
-                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="#ID# 없을 때 입력" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#장부ID# 파일명 자동 매칭"}</small></div>
+                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><select aria-label="증빙 계좌" value={evidenceAccountId} onChange={(event) => setEvidenceAccountId(event.target.value)}><option value="primary">운영 main 계좌</option><option value="dues_intake">회비입금전용 계좌</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="#ID# 또는 *ID* 없을 때 입력" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#ID# 운영계좌 · *ID* 회비계좌 자동 매칭"}</small></div>
               </div>
               {snapshot?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.reconciliation.balance_delta)}</strong><span>장부 {snapshot.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.reconciliation.matched_ledger_count}건</span></div>}
               <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>

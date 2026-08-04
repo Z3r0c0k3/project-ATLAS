@@ -57,8 +57,12 @@ class PackageGenerationTest(unittest.TestCase):
         transactions = [
             Transaction(1, "2026-03-01", "회비", 100_000, 0, 1_100_000),
             Transaction(2, "2026-03-02", "현수막", 0, 20_000, 1_080_000, evidence_id="ev1"),
+            Transaction(3, "2026-03-03", "회비 환불 소명", 0, 10_000, 1_070_000, evidence_id="ev2"),
         ]
-        evidence = [Evidence("ev1", 2, "receipt.png", "receipt")]
+        evidence = [
+            Evidence("ev1", 2, "receipt.png", "receipt"),
+            Evidence("ev2", 3, "*3* dues-refund.pdf", "explanation", account_id="dues_intake"),
+        ]
 
         with tempfile.TemporaryDirectory() as tmp:
             result = build_submission_package(
@@ -70,7 +74,7 @@ class PackageGenerationTest(unittest.TestCase):
                 "회장",
                 "검토",
                 1_000_000,
-                1_080_000,
+                1_070_000,
                 transactions,
                 evidence,
                 40,
@@ -85,6 +89,8 @@ class PackageGenerationTest(unittest.TestCase):
             self.assertIn("검증_리포트.html", names)
             self.assertIn("manifest.json", names)
             self.assertEqual(len(result["zip_sha256"]), 64)
+            accounts = result["document_coverage"]["evidence_document"]["account_breakdown"]
+            self.assertIn("dues_intake", {item["account_id"] for item in accounts})
 
 
 if __name__ == "__main__":

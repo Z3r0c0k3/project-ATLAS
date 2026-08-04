@@ -37,6 +37,7 @@ class Evidence:
     transaction_number: int | None
     filename: str
     kind: str
+    account_id: str = "primary"
     url: str | None = None
     local_path: str | None = None
     transaction_ids: tuple[str, ...] = ()
@@ -125,6 +126,7 @@ def normalize_evidence(rows: Iterable[dict]) -> list[Evidence]:
             transaction_number=row.get("transaction_number"),
             filename=str(row["filename"]),
             kind=str(row.get("kind") or "other"),
+            account_id=str(row.get("account_id") or "primary"),
             url=row.get("url"),
             local_path=row.get("local_path"),
             transaction_ids=tuple(str(item) for item in row.get("transaction_ids") or []),

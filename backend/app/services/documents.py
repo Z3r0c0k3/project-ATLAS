@@ -34,6 +34,14 @@ def _won(value: int) -> str:
     return f"{value:,}원"
 
 
+def _account_label(account_id: str | None) -> str:
+    labels = {
+        "primary": "동아리 운영 토스뱅크 main 계좌",
+        "dues_intake": "회비입금전용 기업은행 계좌",
+    }
+    return labels.get(account_id or "primary", account_id or "primary")
+
+
 def _effective_row_capacity(requested: int, transaction_count: int) -> int:
     required = max(requested, transaction_count)
     for capacity in (40, 80, 120):
@@ -226,6 +234,15 @@ def generate_evidence_document(
     embedded_pages = 0
     unsupported_files: list[str] = []
     missing_expenses: list[int] = []
+    account_breakdown: dict[str, dict[str, int | str]] = {}
+
+    def count_account(item: Evidence, pages: int = 0) -> None:
+        row = account_breakdown.setdefault(
+            item.account_id,
+            {"account_id": item.account_id, "label": _account_label(item.account_id), "files": 0, "pages": 0},
+        )
+        row["files"] = int(row["files"]) + 1
+        row["pages"] = int(row["pages"]) + pages
 
     if not expense_rows:
         doc.add_paragraph("지출 거래가 없습니다.")
@@ -242,16 +259,18 @@ def generate_evidence_document(
             continue
         for evidence_index, item in enumerate(linked):
             used_evidence.add(item.id)
-            doc.add_paragraph(f"첨부 {evidence_index + 1}: {item.filename} ({item.kind})")
+            doc.add_paragraph(f"첨부 {evidence_index + 1}: {item.filename} ({item.kind}, {_account_label(item.account_id)})")
             source = Path(item.local_path) if item.local_path else None
             pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
             if not pages:
                 unsupported_files.append(item.filename)
+                count_account(item)
                 doc.add_paragraph("문서에 직접 표시할 수 없는 형식입니다. 원본 파일은 제출 ZIP의 증빙자료 폴더에 포함됩니다.")
                 if item.url:
                     doc.add_paragraph(item.url)
                 continue
             embedded_files += 1
+            count_account(item, len(pages))
             for page_index, page in enumerate(pages):
                 if page_index:
                     doc.add_page_break()
@@ -265,14 +284,16 @@ def generate_evidence_document(
         doc.add_heading("미연결 증빙자료", level=2)
         doc.add_paragraph("거래 번호가 지정되지 않은 자료입니다. 누락 방지를 위해 원본과 미리보기를 함께 수록합니다.")
         for item in unlinked:
-            doc.add_heading(item.filename, level=3)
+            doc.add_heading(f"{item.filename} - {_account_label(item.account_id)}", level=3)
             source = Path(item.local_path) if item.local_path else None
             pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
             if not pages:
                 unsupported_files.append(item.filename)
+                count_account(item)
                 doc.add_paragraph("직접 표시할 수 없는 형식이며 원본은 제출 ZIP에 포함됩니다.")
                 continue
             embedded_files += 1
+            count_account(item, len(pages))
             for page in pages:
                 _add_contained_picture(doc.add_paragraph(), page, max_width=6.6, max_height=8.8)
                 embedded_pages += 1
@@ -286,6 +307,7 @@ def generate_evidence_document(
         "embedded_files": embedded_files,
         "embedded_pages": embedded_pages,
         "unsupported_files": sorted(set(unsupported_files)),
+        "account_breakdown": list(account_breakdown.values()),
     }
 
 
@@ -303,24 +325,35 @@ def generate_account_capture_document(
     render_dir = output_path.parent / ".rendered-account-captures"
     embedded_pages = 0
     unsupported_files: list[str] = []
-    for index, item in enumerate(captures, 1):
-        if index > 1:
+    account_breakdown: dict[str, dict[str, int | str]] = {}
+    grouped_captures: dict[str, list[Evidence]] = {}
+    for item in captures:
+        grouped_captures.setdefault(item.account_id, []).append(item)
+    section_index = 0
+    for account_id, items in grouped_captures.items():
+        if section_index:
             doc.add_page_break()
-        doc.add_heading(f"계좌내역 캡처 {index}. {item.filename}", level=2)
-        source = Path(item.local_path) if item.local_path else None
-        pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
-        if not pages:
-            unsupported_files.append(item.filename)
-            doc.add_paragraph("직접 표시할 수 없는 형식이며 원본은 제출 ZIP에 포함됩니다.")
-            if item.url:
-                doc.add_paragraph(item.url)
-            continue
-        for page_index, page in enumerate(pages):
-            if page_index:
-                doc.add_page_break()
-                doc.add_heading(f"{item.filename} ({page_index + 1}/{len(pages)})", level=3)
-            _add_contained_picture(doc.add_paragraph(), page, max_width=6.6, max_height=9.0)
-            embedded_pages += 1
+        section_index += 1
+        doc.add_heading(_account_label(account_id), level=2)
+        breakdown = account_breakdown.setdefault(account_id, {"account_id": account_id, "label": _account_label(account_id), "files": 0, "pages": 0})
+        for index, item in enumerate(items, 1):
+            doc.add_heading(f"계좌내역 캡처 {index}. {item.filename}", level=3)
+            source = Path(item.local_path) if item.local_path else None
+            pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
+            breakdown["files"] = int(breakdown["files"]) + 1
+            if not pages:
+                unsupported_files.append(item.filename)
+                doc.add_paragraph("직접 표시할 수 없는 형식이며 원본은 제출 ZIP에 포함됩니다.")
+                if item.url:
+                    doc.add_paragraph(item.url)
+                continue
+            breakdown["pages"] = int(breakdown["pages"]) + len(pages)
+            for page_index, page in enumerate(pages):
+                if page_index:
+                    doc.add_page_break()
+                    doc.add_heading(f"{item.filename} ({page_index + 1}/{len(pages)})", level=3)
+                _add_contained_picture(doc.add_paragraph(), page, max_width=6.6, max_height=9.0)
+                embedded_pages += 1
 
     bank_rows = bank_transactions or []
     if bank_rows:
@@ -357,6 +390,7 @@ def generate_account_capture_document(
         "embedded_capture_pages": embedded_pages,
         "bank_transaction_rows": len(bank_rows),
         "unsupported_files": sorted(set(unsupported_files)),
+        "account_breakdown": list(account_breakdown.values()),
     }
 
 
