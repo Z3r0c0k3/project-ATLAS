@@ -121,7 +121,7 @@ npm audit --audit-level=moderate
 
 안전한 난수는 다음처럼 만들 수 있다.
 
-```bash
+```ba
 openssl rand -hex 32
 ```
 
@@ -133,6 +133,11 @@ docker compose -f docker-compose.prod.yml ps
 ```
 
 Caddy가 도메인의 TLS 인증서를 자동 발급하고, 외부에는 80/443 포트만 노출한다.
+
+Cloudflare Tunnel을 사용하는 경우 Public Hostname의 서비스는
+`http://127.0.0.1:5173`으로 지정한다. 운영 Compose는 이 포트를 loopback에만
+게시하므로 외부에서는 직접 접근할 수 없고 Tunnel을 통해서만 접근한다. 배포 후에는
+원본 서버에서 `curl http://127.0.0.1:5173/api/health`가 먼저 성공해야 한다.
 
 ## Google 연동
 

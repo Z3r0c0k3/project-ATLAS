@@ -63,8 +63,14 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || response.statusText);
+    const raw = await response.text();
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html") || raw.trimStart().startsWith("<!DOCTYPE html")) {
+      throw new Error(`서버 연결에 실패했습니다 (${response.status}). ATLAS 컨테이너와 Cloudflare Tunnel 상태를 확인해주세요.`);
+    }
+    let parsed: any = null;
+    try { parsed = JSON.parse(raw); } catch { /* Plain-text API response. */ }
+    throw new Error(parsed?.detail || parsed?.message || raw || response.statusText);
   }
   return response.json() as Promise<T>;
 }

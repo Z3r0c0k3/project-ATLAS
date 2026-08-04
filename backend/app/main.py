@@ -220,9 +220,9 @@ def current_google_connection() -> dict | None:
     return rows[-1] if rows else None
 
 
-def google_access_token(connection: dict) -> str:
+def google_access_token(connection: dict, force_refresh: bool = False) -> str:
     token = secret_box.decrypt(connection.get("encrypted_access_token"))
-    if token:
+    if token and not force_refresh:
         return token
     refresh_token = secret_box.decrypt(connection.get("encrypted_refresh_token"))
     if not refresh_token:
@@ -230,6 +230,15 @@ def google_access_token(connection: dict) -> str:
     token = refresh_access_token(refresh_token)
     store.update("google_connections", connection["id"], {"encrypted_access_token": secret_box.encrypt(token)})
     return token
+
+
+def call_google_api(connection: dict, operation):
+    try:
+        return operation(google_access_token(connection))
+    except GoogleApiError as exc:
+        if exc.status_code != 401 or not connection.get("encrypted_refresh_token"):
+            raise
+    return operation(google_access_token(connection, force_refresh=True))
 
 
 def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> list[dict]:
@@ -401,7 +410,7 @@ def get_google_sheets(
     if not connection or not connection.get("encrypted_refresh_token") and not connection.get("encrypted_access_token"):
         return {"connection": google_connection_status(None), "sheets": []}
     try:
-        return {"connection": google_connection_status(connection), "sheets": list_spreadsheets(google_access_token(connection))}
+        return {"connection": google_connection_status(connection), "sheets": call_google_api(connection, list_spreadsheets)}
     except GoogleApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -414,7 +423,7 @@ def get_google_drive_files(
     if not connection or not connection.get("encrypted_refresh_token") and not connection.get("encrypted_access_token"):
         return {"connection": google_connection_status(None), "files": []}
     try:
-        return {"connection": google_connection_status(connection), "files": list_drive_files(google_access_token(connection))}
+        return {"connection": google_connection_status(connection), "files": call_google_api(connection, list_drive_files)}
     except GoogleApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -429,7 +438,7 @@ def snapshot_google_sheet(
     if not connection:
         raise HTTPException(status_code=409, detail="Google account is not connected")
     try:
-        result = get_sheet_values(google_access_token(connection), spreadsheet_id, payload.range)
+        result = call_google_api(connection, lambda token: get_sheet_values(token, spreadsheet_id, payload.range))
     except GoogleApiError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     transactions = parse_google_sheet_rows(result.get("values", []), payload.opening_balance)

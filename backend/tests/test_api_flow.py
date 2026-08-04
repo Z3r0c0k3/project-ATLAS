@@ -152,6 +152,30 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertTrue(self.client.get("/auth/google/status", headers=self.headers).json()["connected"])
         self.assertFalse(self.client.post("/auth/google/disconnect", headers=self.headers).json()["connected"])
 
+    def test_google_api_refreshes_an_expired_access_token(self) -> None:
+        connection = main.store.insert(
+            "google_connections",
+            {
+                "account_email": "aegis@example.com",
+                "encrypted_access_token": main.secret_box.encrypt("expired-access"),
+                "encrypted_refresh_token": main.secret_box.encrypt("refresh-token"),
+                "scopes": [],
+            },
+            "goog",
+        )
+        expired = main.GoogleApiError("expired", status_code=401)
+        with patch("app.main.list_spreadsheets", side_effect=[expired, [{"id": "sheet-1", "name": "Aegis"}]]) as list_mock, patch(
+            "app.main.refresh_access_token", return_value="renewed-access"
+        ) as refresh_mock:
+            response = self.client.get("/google/sheets", headers=self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["sheets"][0]["id"], "sheet-1")
+        self.assertEqual(list_mock.call_count, 2)
+        refresh_mock.assert_called_once_with("refresh-token")
+        stored = main.store.get("google_connections", connection["id"])
+        self.assertEqual(main.secret_box.decrypt(stored["encrypted_access_token"]), "renewed-access")
+
 
 if __name__ == "__main__":
     unittest.main()

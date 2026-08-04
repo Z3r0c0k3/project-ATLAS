@@ -16,7 +16,9 @@ GOOGLE_SHEETS_SCOPES = [
 
 
 class GoogleApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def google_connection_status(connection: dict | None) -> dict:
@@ -73,7 +75,7 @@ def _token_request(payload: dict) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise GoogleApiError(f"Google OAuth request failed: {exc.code} {detail}") from exc
+        raise GoogleApiError(f"Google OAuth request failed: {exc.code} {detail}", exc.code) from exc
     except urllib.error.URLError as exc:
         raise GoogleApiError(f"Google OAuth connection failed: {exc.reason}") from exc
 
@@ -121,7 +123,7 @@ def _api_get(url: str, access_token: str, params: dict | None = None) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise GoogleApiError(f"Google API request failed: {exc.code} {detail}") from exc
+        raise GoogleApiError(f"Google API request failed: {exc.code} {detail}", exc.code) from exc
     except urllib.error.URLError as exc:
         raise GoogleApiError(f"Google API connection failed: {exc.reason}") from exc
 
