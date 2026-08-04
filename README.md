@@ -117,7 +117,7 @@ npm audit --audit-level=moderate
 서버에서 `.env.example`을 `.env`로 만들고 다음 값을 반드시 변경한다.
 
 - `ATLAS_DOMAIN`: 프론트엔드 공개 도메인, 예: `atlas.dkuaegis.org`
-- `ATLAS_API_DOMAIN`: 백엔드 공개 도메인, 예: `api.atlas.dkuaegis.org`
+- `ATLAS_API_DOMAIN`: 백엔드 공개 도메인, 예: `atlas-api.dkuaegis.org`
 - `ATLAS_SECRET_KEY`: OAuth와 Webhook 암호화용 긴 난수
 - `ATLAS_LOGIN_PASSWORD`: 운영 화면 로그인 비밀번호
 - `ATLAS_USER_ROLES`: 사용자명과 역할을 연결한 JSON 객체
@@ -145,11 +145,17 @@ loopback으로 열린다.
 Cloudflare Tunnel의 Public Hostname은 두 개를 만든다.
 
 - `atlas.dkuaegis.org` → `http://127.0.0.1:5173`
-- `api.atlas.dkuaegis.org` → `http://127.0.0.1:8000`
+- `atlas-api.dkuaegis.org` → `http://127.0.0.1:8000`
 
 배포 후 원본 서버에서 `curl http://127.0.0.1:5173`와
 `curl http://127.0.0.1:8000/health`가 먼저 성공해야 한다. 그 다음 외부에서
-`https://atlas.dkuaegis.org`와 `https://api.atlas.dkuaegis.org/health`를 확인한다.
+`https://atlas.dkuaegis.org`와 `https://atlas-api.dkuaegis.org/health`를 확인한다.
+
+Cloudflare Universal SSL을 쓰는 일반적인 full setup에서는 `*.dkuaegis.org` 같은
+1단계 서브도메인까지만 자동 인증서가 적용된다. 따라서 `api.atlas.dkuaegis.org`처럼
+2단계 서브도메인을 쓰면 브라우저가 `ERR_SSL_VERSION_OR_CIPHER_MISMATCH`를 낼 수 있다.
+이 주소를 꼭 써야 한다면 Cloudflare Advanced Certificate Manager, Total TLS 또는
+해당 호스트명을 포함한 Custom SSL 인증서가 필요하다.
 
 ## Google 연동
 
