@@ -4,7 +4,7 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -298,6 +298,33 @@ def raise_google_http_error(exc: GoogleApiError) -> None:
     raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
+def normalize_google_sheet_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+
+    serial: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        serial = float(value)
+    else:
+        text = str(value or "").strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            serial = float(text)
+
+    if serial is not None and 1 <= serial <= 2_958_465:
+        return (datetime(1899, 12, 30) + timedelta(days=serial)).date().isoformat()
+
+    text = str(value or "").strip()
+    for pattern in ("%Y-%m-%d", "%Y. %m. %d", "%Y.%m.%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, pattern).date().isoformat()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return text
+
+
 def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> list[dict]:
     if not values:
         return []
@@ -337,7 +364,7 @@ def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> li
         parsed.append(
             {
                 "number": number(padded[0]) or index,
-                "date": str(padded[1]),
+                "date": normalize_google_sheet_date(padded[1]),
                 "description": str(padded[2] or ""),
                 "income": income,
                 "expense": expense,

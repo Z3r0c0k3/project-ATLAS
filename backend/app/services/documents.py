@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import copy
 import html
 import json
+import os
 import shutil
+import subprocess
+import tempfile
+import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from docx import Document
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.shared import Cm, Inches, Pt, RGBColor
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from docx.shared import Inches
+from openpyxl import load_workbook
 
 from .accounting import (
     VALIDATION_RULE_VERSION,
@@ -27,7 +28,7 @@ from .integrity import canonical_sha256, file_sha256
 from .media import image_dimensions, render_media_pages
 
 
-TEMPLATE_VERSION = "atlas-documents-v1.2-dongyeon-profile"
+TEMPLATE_VERSION = "atlas-documents-v1.3-official-template-fill"
 
 
 def _won(value: int) -> str:
@@ -47,21 +48,73 @@ def _effective_row_capacity(requested: int, transaction_count: int) -> int:
     for capacity in (40, 80, 120):
         if required <= capacity:
             return capacity
-    return required
+    raise ValueError("공식 수입지출관리대장 양식은 최대 120칸까지 지원합니다.")
 
 
-def _style_header(cell) -> None:
-    cell.fill = PatternFill("solid", fgColor="93C94D")
-    cell.font = Font(bold=True)
-    cell.alignment = Alignment(horizontal="center", vertical="center")
+def _normalized(value: str) -> str:
+    return unicodedata.normalize("NFC", value)
 
 
-def _apply_border(ws, max_row: int, max_col: int) -> None:
-    side = Side(style="thin", color="666666")
-    for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
-        for cell in row:
-            cell.border = Border(left=side, right=side, top=side, bottom=side)
-            cell.alignment = Alignment(vertical="center", wrap_text=True)
+def _official_template_dir() -> Path:
+    candidates = []
+    if os.getenv("ATLAS_TEMPLATE_ROOT"):
+        candidates.append(Path(os.environ["ATLAS_TEMPLATE_ROOT"]))
+    candidates.extend((Path("/app/sample"), Path(__file__).resolve().parents[3] / "sample"))
+    for candidate in candidates:
+        if candidate.is_dir() and "표준회계양식" in _normalized(candidate.name):
+            return candidate
+        if not candidate.is_dir():
+            continue
+        for child in candidate.iterdir():
+            if child.is_dir() and "표준회계양식" in _normalized(child.name):
+                return child
+    raise FileNotFoundError("동아리연합회 공식 회계양식 디렉터리를 찾을 수 없습니다.")
+
+
+def _official_template(kind: str, capacity: int | None = None) -> Path:
+    for path in _official_template_dir().iterdir():
+        name = _normalized(path.name)
+        if kind == "ledger" and path.suffix.lower() == ".xls" and f"({capacity}칸)" in name:
+            return path
+        if kind == "evidence" and path.suffix.lower() == ".docx" and "영수증 및 소명자료" in name:
+            return path
+        if kind == "account" and path.suffix.lower() == ".docx" and "계좌전체내역" in name:
+            return path
+    raise FileNotFoundError(f"동아리연합회 공식 양식을 찾을 수 없습니다: {kind}")
+
+
+def _convert_official_ledger_template(template_path: Path, destination: Path) -> None:
+    soffice = os.getenv("ATLAS_SOFFICE_BIN") or shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise RuntimeError("공식 .xls 양식 변환에 필요한 LibreOffice를 찾을 수 없습니다.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="atlas-ledger-template-") as temporary:
+        workdir = Path(temporary)
+        profile = workdir / "profile"
+        converted_dir = workdir / "converted"
+        profile.mkdir()
+        converted_dir.mkdir()
+        process = subprocess.run(
+            [
+                soffice,
+                f"-env:UserInstallation={profile.resolve().as_uri()}",
+                "--headless",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                str(converted_dir),
+                str(template_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        converted = next(converted_dir.glob("*.xlsx"), None)
+        if process.returncode or converted is None:
+            detail = (process.stderr or process.stdout or "unknown conversion error").strip()
+            raise RuntimeError(f"공식 수입지출관리대장 양식을 변환할 수 없습니다: {detail}")
+        shutil.copy2(converted, destination)
 
 
 def generate_ledger_workbook(
@@ -73,102 +126,43 @@ def generate_ledger_workbook(
     opening_balance: int,
     transactions: list[Transaction],
     row_capacity: int,
-) -> None:
+) -> dict:
     row_capacity = _effective_row_capacity(row_capacity, len(transactions))
-    wb = Workbook()
+    template_path = _official_template("ledger", row_capacity)
+    _convert_official_ledger_template(template_path, output_path)
+    wb = load_workbook(output_path)
     ws = wb.active
-    ws.title = "수입지출관리대장"
+    ws["B2"] = f"{club_name} 수입지출 관리대장"
+    ws["R3"] = f"{treasurer_name}  (인)"
+    ws["V3"] = f"{president_name}  (인)"
+    semester_label = next((label for label in ("1학기", "2학기") if label in semester), semester)
+    ws["B7"] = semester_label
+    ws["T7"] = opening_balance
 
-    ws["A1"] = f"{club_name} 수입지출 관리대장"
-    ws["A1"].font = Font(size=18, bold=True)
-    ws["A2"] = semester
-    ws["F1"] = "담당"
-    ws["G1"] = "회장"
-    ws["F2"] = f"{treasurer_name} (인)"
-    ws["G2"] = f"{president_name} (인)"
-    ws["F3"] = "이전 잔액"
-    ws["G3"] = opening_balance
-
-    headers = ["번호", "날짜", "내용", "수입금액", "지출금액", "잔액", "비고"]
-    start_row = 5
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(start_row, col, header)
-        _style_header(cell)
-
+    start_row = 10
     for index in range(row_capacity):
-        row = start_row + 1 + index
+        row = start_row + index
         if index < len(transactions):
             tx = transactions[index]
-            values = [tx.number, tx.date, tx.description, tx.income or None, tx.expense or None, tx.balance, tx.note]
+            try:
+                transaction_date = datetime.fromisoformat(tx.date).replace(tzinfo=None)
+            except ValueError:
+                transaction_date = tx.date
+            ws.cell(row, 2, tx.number)
+            ws.cell(row, 4, transaction_date)
+            ws.cell(row, 7, tx.description)
+            ws.cell(row, 11, tx.income or None)
+            ws.cell(row, 17, tx.expense or None)
+            ws.cell(row, 24, tx.note)
         else:
-            values = [index + 1, "", "", None, None, None, ""]
-        for col, value in enumerate(values, 1):
-            ws.cell(row, col, value)
-
-    total_row = start_row + row_capacity + 2
-    ws.cell(total_row, 1, "합계")
-    ws.cell(total_row, 4, f"=SUM(D{start_row + 1}:D{start_row + row_capacity})")
-    ws.cell(total_row, 5, f"=SUM(E{start_row + 1}:E{start_row + row_capacity})")
-    ws.cell(total_row, 6, f"=G3+D{total_row}-E{total_row}")
-    ws.cell(total_row + 1, 1, "비고")
-    ws.merge_cells(start_row=total_row + 1, start_column=2, end_row=total_row + 1, end_column=7)
-
-    for col in range(1, 8):
-        _style_header(ws.cell(total_row, col))
-    _style_header(ws.cell(total_row + 1, 1))
-
-    widths = [8, 14, 36, 16, 16, 16, 34]
-    for col, width in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + col)].width = width
-    for row in range(1, total_row + 2):
-        ws.row_dimensions[row].height = 24
-
-    _apply_border(ws, total_row + 1, 7)
-    for row in ws.iter_rows(min_row=start_row + 1, max_row=total_row, min_col=4, max_col=6):
-        for cell in row:
-            cell.number_format = '#,##0'
-    ws["G3"].number_format = '#,##0'
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+            ws.cell(row, 2, index + 1)
+            for column in (4, 7, 11, 17, 24):
+                ws.cell(row, column, None)
+    if hasattr(wb, "calculation"):
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
     wb.save(output_path)
-
-
-def _configure_document(doc: Document) -> None:
-    for section in doc.sections:
-        section.page_width = Cm(21)
-        section.page_height = Cm(29.7)
-        section.top_margin = Cm(1.5)
-        section.bottom_margin = Cm(1.5)
-        section.left_margin = Cm(1.6)
-        section.right_margin = Cm(1.6)
-    normal = doc.styles["Normal"]
-    normal.font.name = "Malgun Gothic"
-    normal.font.size = Pt(9)
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Malgun Gothic")
-
-
-def _shade_cell(cell, color: str = "E9F3DF") -> None:
-    properties = cell._tc.get_or_add_tcPr()
-    shading = OxmlElement("w:shd")
-    shading.set(qn("w:fill"), color)
-    properties.append(shading)
-
-
-def _repeat_header(row) -> None:
-    properties = row._tr.get_or_add_trPr()
-    header = OxmlElement("w:tblHeader")
-    header.set(qn("w:val"), "true")
-    properties.append(header)
-
-
-def _set_table_font(table, size: int = 9) -> None:
-    for row in table.rows:
-        for cell in row.cells:
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            for paragraph in cell.paragraphs:
-                for run in paragraph.runs:
-                    run.font.name = "Malgun Gothic"
-                    run.font.size = Pt(size)
-                    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Malgun Gothic")
+    return {"template_filename": _normalized(template_path.name), "template_sha256": file_sha256(template_path)}
 
 
 def _add_contained_picture(paragraph, image_path: Path, max_width: float, max_height: float) -> None:
@@ -194,39 +188,85 @@ def _linked_evidence(tx: Transaction, evidence: list[Evidence]) -> list[Evidence
     return linked
 
 
-def _add_transaction_metadata(doc: Document, club_name: str, reviewer_name: str | None, tx: Transaction) -> None:
-    table = doc.add_table(rows=5, cols=4)
-    table.style = "Table Grid"
-    values = (
-        ("번호", str(tx.number), "날짜", tx.date),
-        ("지출자", f"{club_name} 회계담당자 (인)", "검토자", f"{reviewer_name or '-'} (인)"),
-        ("사업명", tx.description, "분류", tx.category),
-        ("내용 및 특이사항", tx.note or "특이사항 없음", "거래 상대방", tx.counterparty or "-"),
-        ("지출 금액", _won(tx.expense), "증빙 상태", "아래 첨부"),
-    )
-    for row_index, row_values in enumerate(values):
-        for column_index, value in enumerate(row_values):
-            cell = table.cell(row_index, column_index)
-            cell.text = value
-            if column_index in {0, 2}:
-                _shade_cell(cell)
-                for run in cell.paragraphs[0].runs:
-                    run.bold = True
-    _set_table_font(table)
+def _set_paragraph_text(paragraph, value: str) -> None:
+    if paragraph.runs:
+        paragraph.runs[0].text = value
+        for run in paragraph.runs[1:]:
+            run.text = ""
+    else:
+        paragraph.add_run(value)
+
+
+def _set_cell_text(cell, value: str) -> None:
+    _set_paragraph_text(cell.paragraphs[0], value)
+    for paragraph in cell.paragraphs[1:]:
+        _set_paragraph_text(paragraph, "")
+
+
+def _fill_image_cell(cell, image_path: Path, label: str, max_width: float, max_height: float) -> None:
+    _set_cell_text(cell, label)
+    paragraph = cell.paragraphs[0]
+    if label:
+        paragraph.add_run("\n")
+    _add_contained_picture(paragraph, image_path, max_width=max_width, max_height=max_height)
+
+
+def _append_evidence_template_pages(doc: Document, required_tables: int) -> None:
+    while len(doc.tables) < required_tables:
+        table_element = doc.tables[-1]._tbl
+        before = table_element.getprevious()
+        after = table_element.getnext()
+        section = doc.element.body.sectPr
+        for element in (before, table_element, after):
+            section.addprevious(copy.deepcopy(element))
+
+
+def _append_account_template_pages(doc: Document, required_tables: int) -> None:
+    while len(doc.tables) < required_tables:
+        table_element = doc.tables[-1]._tbl
+        first_signature = table_element.getnext()
+        second_signature = first_signature.getnext()
+        section = doc.element.body.sectPr
+        for element in (table_element, first_signature, second_signature):
+            section.addprevious(copy.deepcopy(element))
+
+
+def _populate_evidence_slot(table, slot_index: int, entry: dict, treasurer_name: str, reviewer_name: str | None) -> None:
+    base = 0 if slot_index == 0 else 5
+    tx: Transaction | None = entry.get("transaction")
+    item: Evidence | None = entry.get("evidence")
+    image_path: Path | None = entry.get("page")
+    date_value = tx.date if tx else (item.evidence_date if item else None)
+    number_value = tx.number if tx else (item.transaction_number if item else None)
+    description = tx.description if tx else (item.filename if item else "미연결 자료")
+    note = tx.note if tx and tx.note else (entry.get("message") or (item.filename if item else ""))
+    amount = tx.expense if tx else (item.amount if item else None)
+
+    _set_cell_text(table.cell(base, 1), f"날짜 : {date_value or '-'}")
+    _set_cell_text(table.cell(base, 3), f"번호(수입지출관리대장) : {number_value or '-'}")
+    _set_cell_text(table.cell(base + 1, 1), f"지출자 : {treasurer_name}  (인)")
+    _set_cell_text(table.cell(base + 1, 3), f"검토자 : {reviewer_name or '-'}  (인)")
+    _set_cell_text(table.cell(base + 2, 1), f"사업명 : {description}")
+    _set_cell_text(table.cell(base + 3, 1), f"내용 & 특이사항\n{note or '특이사항 없음'}")
+    _set_cell_text(table.cell(base + 4, 1), "지출 금액")
+    _set_cell_text(table.cell(base + 4, 2), _won(int(amount or 0)))
+    image_cell = table.cell(base, 0)
+    if image_path:
+        _fill_image_cell(image_cell, image_path, "", max_width=3.45, max_height=3.55)
+    else:
+        _set_cell_text(image_cell, entry.get("message") or "연결된 영수증 또는 소명자료가 없습니다.")
 
 
 def generate_evidence_document(
     output_path: Path,
     club_name: str,
+    treasurer_name: str,
     reviewer_name: str | None,
     transactions: list[Transaction],
     evidence: list[Evidence],
 ) -> dict:
-    doc = Document()
-    _configure_document(doc)
-    title = doc.add_heading(f"{club_name} 영수증 및 소명자료", level=1)
-    title.runs[0].font.color.rgb = RGBColor(30, 72, 52)
-    doc.add_paragraph("지출항목별 영수증 또는 소명자료 원본을 순서대로 첨부했습니다.")
+    template_path = _official_template("evidence")
+    doc = Document(template_path)
     render_dir = output_path.parent / ".rendered-evidence"
     expense_rows = [item for item in transactions if item.expense]
     used_evidence: set[str] = set()
@@ -235,6 +275,7 @@ def generate_evidence_document(
     unsupported_files: list[str] = []
     missing_expenses: list[int] = []
     account_breakdown: dict[str, dict[str, int | str]] = {}
+    entries: list[dict] = []
 
     def count_account(item: Evidence, pages: int = 0) -> None:
         row = account_breakdown.setdefault(
@@ -244,59 +285,46 @@ def generate_evidence_document(
         row["files"] = int(row["files"]) + 1
         row["pages"] = int(row["pages"]) + pages
 
-    if not expense_rows:
-        doc.add_paragraph("지출 거래가 없습니다.")
-    for tx_index, tx in enumerate(expense_rows):
-        if tx_index:
-            doc.add_page_break()
-        doc.add_heading(f"지출 {tx.number}. {tx.description}", level=2)
-        _add_transaction_metadata(doc, club_name, reviewer_name, tx)
+    for tx in expense_rows:
         linked = [item for item in _linked_evidence(tx, evidence) if item.kind != "account_capture"]
         if not linked:
             missing_expenses.append(tx.number)
-            warning = doc.add_paragraph("연결된 영수증 또는 소명자료가 없습니다.")
-            warning.runs[0].font.color.rgb = RGBColor(180, 35, 35)
+            entries.append({"transaction": tx, "message": "연결된 영수증 또는 소명자료가 없습니다."})
             continue
-        for evidence_index, item in enumerate(linked):
+        for item in linked:
             used_evidence.add(item.id)
-            doc.add_paragraph(f"첨부 {evidence_index + 1}: {item.filename} ({item.kind}, {_account_label(item.account_id)})")
             source = Path(item.local_path) if item.local_path else None
             pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
             if not pages:
                 unsupported_files.append(item.filename)
                 count_account(item)
-                doc.add_paragraph("문서에 직접 표시할 수 없는 형식입니다. 원본 파일은 제출 ZIP의 증빙자료 폴더에 포함됩니다.")
-                if item.url:
-                    doc.add_paragraph(item.url)
-                continue
-            embedded_files += 1
-            count_account(item, len(pages))
-            for page_index, page in enumerate(pages):
-                if page_index:
-                    doc.add_page_break()
-                    doc.add_heading(f"지출 {tx.number} 증빙 계속 - {item.filename} ({page_index + 1}/{len(pages)})", level=3)
-                _add_contained_picture(doc.add_paragraph(), page, max_width=6.6, max_height=7.8)
-                embedded_pages += 1
-
-    unlinked = [item for item in evidence if item.kind != "account_capture" and item.id not in used_evidence]
-    if unlinked:
-        doc.add_page_break()
-        doc.add_heading("미연결 증빙자료", level=2)
-        doc.add_paragraph("거래 번호가 지정되지 않은 자료입니다. 누락 방지를 위해 원본과 미리보기를 함께 수록합니다.")
-        for item in unlinked:
-            doc.add_heading(f"{item.filename} - {_account_label(item.account_id)}", level=3)
-            source = Path(item.local_path) if item.local_path else None
-            pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
-            if not pages:
-                unsupported_files.append(item.filename)
-                count_account(item)
-                doc.add_paragraph("직접 표시할 수 없는 형식이며 원본은 제출 ZIP에 포함됩니다.")
+                entries.append({"transaction": tx, "evidence": item, "message": f"{item.filename}\n원본은 제출 ZIP에 포함됩니다."})
                 continue
             embedded_files += 1
             count_account(item, len(pages))
             for page in pages:
-                _add_contained_picture(doc.add_paragraph(), page, max_width=6.6, max_height=8.8)
+                entries.append({"transaction": tx, "evidence": item, "page": page})
                 embedded_pages += 1
+
+    unlinked = [item for item in evidence if item.kind != "account_capture" and item.id not in used_evidence]
+    for item in unlinked:
+        source = Path(item.local_path) if item.local_path else None
+        pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
+        if not pages:
+            unsupported_files.append(item.filename)
+            count_account(item)
+            entries.append({"evidence": item, "message": f"미연결 자료: {item.filename}\n원본은 제출 ZIP에 포함됩니다."})
+            continue
+        embedded_files += 1
+        count_account(item, len(pages))
+        for page in pages:
+            entries.append({"evidence": item, "page": page, "message": f"미연결 자료: {item.filename}"})
+            embedded_pages += 1
+
+    required_tables = max(1, (len(entries) + 1) // 2)
+    _append_evidence_template_pages(doc, required_tables)
+    for index, entry in enumerate(entries):
+        _populate_evidence_slot(doc.tables[index // 2], index % 2, entry, treasurer_name, reviewer_name)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
@@ -308,79 +336,60 @@ def generate_evidence_document(
         "embedded_pages": embedded_pages,
         "unsupported_files": sorted(set(unsupported_files)),
         "account_breakdown": list(account_breakdown.values()),
+        "template_filename": _normalized(template_path.name),
+        "template_sha256": file_sha256(template_path),
     }
 
 
 def generate_account_capture_document(
     output_path: Path,
     club_name: str,
+    president_name: str,
     evidence: list[Evidence],
     bank_transactions: list[dict] | None = None,
 ) -> dict:
-    doc = Document()
-    _configure_document(doc)
-    title = doc.add_heading(f"{club_name} 계좌전체내역", level=1)
-    title.runs[0].font.color.rgb = RGBColor(30, 72, 52)
+    template_path = _official_template("account")
+    doc = Document(template_path)
     captures = [item for item in evidence if item.kind == "account_capture"]
     render_dir = output_path.parent / ".rendered-account-captures"
     embedded_pages = 0
     unsupported_files: list[str] = []
     account_breakdown: dict[str, dict[str, int | str]] = {}
-    grouped_captures: dict[str, list[Evidence]] = {}
+    entries: list[dict] = []
     for item in captures:
-        grouped_captures.setdefault(item.account_id, []).append(item)
-    section_index = 0
-    for account_id, items in grouped_captures.items():
-        if section_index:
-            doc.add_page_break()
-        section_index += 1
-        doc.add_heading(_account_label(account_id), level=2)
-        breakdown = account_breakdown.setdefault(account_id, {"account_id": account_id, "label": _account_label(account_id), "files": 0, "pages": 0})
-        for index, item in enumerate(items, 1):
-            doc.add_heading(f"계좌내역 캡처 {index}. {item.filename}", level=3)
-            source = Path(item.local_path) if item.local_path else None
-            pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
-            breakdown["files"] = int(breakdown["files"]) + 1
-            if not pages:
-                unsupported_files.append(item.filename)
-                doc.add_paragraph("직접 표시할 수 없는 형식이며 원본은 제출 ZIP에 포함됩니다.")
-                if item.url:
-                    doc.add_paragraph(item.url)
-                continue
-            breakdown["pages"] = int(breakdown["pages"]) + len(pages)
-            for page_index, page in enumerate(pages):
-                if page_index:
-                    doc.add_page_break()
-                    doc.add_heading(f"{item.filename} ({page_index + 1}/{len(pages)})", level=3)
-                _add_contained_picture(doc.add_paragraph(), page, max_width=6.6, max_height=9.0)
-                embedded_pages += 1
+        breakdown = account_breakdown.setdefault(item.account_id, {"account_id": item.account_id, "label": _account_label(item.account_id), "files": 0, "pages": 0})
+        source = Path(item.local_path) if item.local_path else None
+        pages = render_media_pages(source, render_dir / item.id) if source and source.exists() else []
+        breakdown["files"] = int(breakdown["files"]) + 1
+        if not pages:
+            unsupported_files.append(item.filename)
+            entries.append({"evidence": item, "message": f"{item.filename}\n원본은 제출 ZIP에 포함됩니다."})
+            continue
+        breakdown["pages"] = int(breakdown["pages"]) + len(pages)
+        for page in pages:
+            entries.append({"evidence": item, "page": page})
+            embedded_pages += 1
+
+    required_tables = max(1, (len(entries) + 3) // 4)
+    _append_account_template_pages(doc, required_tables)
+    for paragraph in doc.paragraphs:
+        normalized_text = _normalized(paragraph.text)
+        if "동아리" in normalized_text:
+            _set_paragraph_text(paragraph, f"{club_name} ")
+        elif "회장" in normalized_text:
+            _set_paragraph_text(paragraph, f"회장 {president_name}  (인) ")
+    for index, entry in enumerate(entries):
+        table = doc.tables[index // 4]
+        position = index % 4
+        cell = table.cell(position // 2, position % 2)
+        item = entry["evidence"]
+        label = f"<{index + 1}> {_account_label(item.account_id)}"
+        if entry.get("page"):
+            _fill_image_cell(cell, entry["page"], label, max_width=3.0, max_height=3.55)
+        else:
+            _set_cell_text(cell, f"{label}\n{entry['message']}")
 
     bank_rows = bank_transactions or []
-    if bank_rows:
-        if captures:
-            doc.add_page_break()
-        doc.add_heading("토스뱅크 전체 거래내역", level=2)
-        doc.add_paragraph("업로드된 토스뱅크 원본의 모든 거래를 시간순으로 수록했습니다.")
-        table = doc.add_table(rows=1, cols=5)
-        table.style = "Table Grid"
-        headers = ("거래 일시", "적요 / 메모", "유형", "거래 금액", "거래 후 잔액")
-        for index, header in enumerate(headers):
-            table.cell(0, index).text = header
-            _shade_cell(table.cell(0, index))
-        _repeat_header(table.rows[0])
-        for item in bank_rows:
-            cells = table.add_row().cells
-            cells[0].text = str(item.get("occurred_at", "")).replace("T", " ")
-            description = str(item.get("description") or "")
-            memo = str(item.get("memo") or "")
-            cells[1].text = description if not memo else f"{description}\n{memo}"
-            cells[2].text = str(item.get("transaction_type") or "")
-            cells[3].text = f"{int(item.get('amount') or 0):+,}원"
-            cells[4].text = _won(int(item.get("balance") or 0))
-        _set_table_font(table, 8)
-    elif not captures:
-        warning = doc.add_paragraph("계좌전체내역 캡처 또는 은행 거래내역 파일이 연결되지 않았습니다.")
-        warning.runs[0].font.color.rgb = RGBColor(180, 35, 35)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
@@ -391,6 +400,8 @@ def generate_account_capture_document(
         "bank_transaction_rows": len(bank_rows),
         "unsupported_files": sorted(set(unsupported_files)),
         "account_breakdown": list(account_breakdown.values()),
+        "template_filename": _normalized(template_path.name),
+        "template_sha256": file_sha256(template_path),
     }
 
 
@@ -492,7 +503,7 @@ def build_submission_package(
     zip_path = output_root / f"{package_id}.zip"
 
     effective_capacity = _effective_row_capacity(row_capacity, len(transactions))
-    generate_ledger_workbook(
+    ledger_coverage = generate_ledger_workbook(
         ledger_path,
         club_name,
         semester,
@@ -502,8 +513,21 @@ def build_submission_package(
         transactions,
         effective_capacity,
     )
-    evidence_coverage = generate_evidence_document(evidence_path, club_name, reviewer_name, transactions, evidence)
-    account_coverage = generate_account_capture_document(captures_path, club_name, evidence, bank_transactions)
+    evidence_coverage = generate_evidence_document(
+        evidence_path,
+        club_name,
+        treasurer_name,
+        reviewer_name,
+        transactions,
+        evidence,
+    )
+    account_coverage = generate_account_capture_document(
+        captures_path,
+        club_name,
+        president_name,
+        evidence,
+        bank_transactions,
+    )
     generate_validation_report(report_path, validation, reconciliation)
 
     copied_evidence: list[dict] = []
@@ -571,6 +595,7 @@ def build_submission_package(
     document_coverage = {
         "ledger_transaction_rows": len(transactions),
         "ledger_row_capacity": effective_capacity,
+        "ledger_template": ledger_coverage,
         "evidence_document": evidence_coverage,
         "account_document": account_coverage,
         "copied_evidence_files": len(copied_evidence),

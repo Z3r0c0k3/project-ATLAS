@@ -53,6 +53,24 @@ class AccountingValidationTest(unittest.TestCase):
 
 
 class PackageGenerationTest(unittest.TestCase):
+    def test_official_ledger_template_rejects_more_than_120_rows(self) -> None:
+        transactions = [Transaction(index, "2026-03-01", f"거래 {index}", 0, 1, -index) for index in range(1, 122)]
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "최대 120칸"):
+            build_submission_package(
+                Path(tmp),
+                "pkg_too_many",
+                "Aegis",
+                "2026년 1학기",
+                "회계",
+                "회장",
+                "검토",
+                0,
+                -121,
+                transactions,
+                [],
+                120,
+            )
+
     def test_submission_package_zip_contains_required_artifacts(self) -> None:
         transactions = [
             Transaction(1, "2026-03-01", "회비", 100_000, 0, 1_100_000),
@@ -89,6 +107,9 @@ class PackageGenerationTest(unittest.TestCase):
             self.assertIn("검증_리포트.html", names)
             self.assertIn("manifest.json", names)
             self.assertEqual(len(result["zip_sha256"]), 64)
+            self.assertIn("40칸", result["document_coverage"]["ledger_template"]["template_filename"])
+            self.assertIn("영수증 및 소명자료", result["document_coverage"]["evidence_document"]["template_filename"])
+            self.assertIn("계좌전체내역", result["document_coverage"]["account_document"]["template_filename"])
             accounts = result["document_coverage"]["evidence_document"]["account_breakdown"]
             self.assertIn("dues_intake", {item["account_id"] for item in accounts})
 

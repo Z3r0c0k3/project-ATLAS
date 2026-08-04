@@ -184,5 +184,9 @@ def get_sheet_values(access_token: str, spreadsheet_id: str, range_name: str) ->
     return _api_get(
         f"https://sheets.googleapis.com/v4/spreadsheets/{urllib.parse.quote(spreadsheet_id, safe='')}/values/{encoded_range}",
         access_token,
-        {"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"},
+        {
+            "majorDimension": "ROWS",
+            "valueRenderOption": "UNFORMATTED_VALUE",
+            "dateTimeRenderOption": "FORMATTED_STRING",
+        },
     )

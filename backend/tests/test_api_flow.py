@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.services.google import _format_google_http_error
+from app.services.google import _format_google_http_error, get_sheet_values
 from app.services.jobs import JobRunner
 from app.services.store import JsonStore
 
@@ -244,8 +244,8 @@ class ApiWorkflowTest(unittest.TestCase):
                 ["2026년 Aegis 회계장부"],
                 [],
                 ["No", "날짜", "내용", "수입", "지출", "잔액", "처리방식", "상세정보"],
-                [1, "2026-03-01", "회비", 100000, 0, 1100000, "계좌이체", "입금자명: 회원"],
-                [2, "2026-03-02", "현수막", 0, 20000, 1080000, "카드결제", "결제처: 테스트상점"],
+                [1, 46071, "회비", 100000, 0, 1100000, "계좌이체", "입금자명: 회원"],
+                [2, "2026. 2. 19", "현수막", 0, 20000, 1080000, "카드결제", "결제처: 테스트상점"],
             ],
         }
         with patch("app.main.get_sheet_values", return_value=sheet_values) as values_mock:
@@ -266,11 +266,20 @@ class ApiWorkflowTest(unittest.TestCase):
         imported = response.json()
         self.assertEqual(imported["source"]["spreadsheet_id"], "test-ledger-sheet-id-1234567890")
         self.assertEqual(imported["transaction_count"], 2)
+        self.assertEqual(imported["transactions"][0]["date"], "2026-02-18")
+        self.assertEqual(imported["transactions"][1]["date"], "2026-02-19")
         self.assertEqual(imported["transactions"][1]["description"], "현수막")
         self.assertEqual(imported["transactions"][1]["processing_method"], "카드결제")
         self.assertEqual(imported["transactions"][1]["details"], "결제처: 테스트상점")
         self.assertEqual(imported["transactions"][1]["source_row"], "6")
         values_mock.assert_called_once_with("access-token", "test-ledger-sheet-id-1234567890", "B:I")
+
+    def test_google_sheet_values_request_formats_dates_as_strings(self) -> None:
+        with patch("app.services.google._api_get", return_value={"values": []}) as api_get:
+            get_sheet_values("access-token", "sheet-id", "B:I")
+
+        self.assertEqual(api_get.call_args.args[2]["valueRenderOption"], "UNFORMATTED_VALUE")
+        self.assertEqual(api_get.call_args.args[2]["dateTimeRenderOption"], "FORMATTED_STRING")
 
     def test_google_service_disabled_error_is_human_readable(self) -> None:
         detail = {
