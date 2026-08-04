@@ -489,8 +489,17 @@ def google_diagnostics(
     except GoogleApiError as exc:
         # A Google 400/403 here proves outbound Google API connectivity and credential handling reached Google.
         diagnostics["checks"].append({"name": "google_api_reachable", "status": "ok" if exc.status_code in {400, 403, 404} else "error", "message": str(exc), "status_code": exc.status_code})
-        return diagnostics
-    diagnostics["checks"].append({"name": "google_api_reachable", "status": "ok"})
+        if exc.status_code not in {400, 403, 404}:
+            return diagnostics
+    else:
+        diagnostics["checks"].append({"name": "google_api_reachable", "status": "ok"})
+    for name, operation in (("sheets_list", list_spreadsheets), ("drive_files_list", list_drive_files)):
+        try:
+            rows = call_google_api(connection, operation)
+        except GoogleApiError as exc:
+            diagnostics["checks"].append({"name": name, "status": "error", "message": str(exc), "status_code": exc.status_code})
+        else:
+            diagnostics["checks"].append({"name": name, "status": "ok", "count": len(rows), "sample": rows[:3]})
     return diagnostics
 
 

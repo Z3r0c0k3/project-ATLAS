@@ -200,6 +200,30 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(diagnostics.status_code, 200)
         self.assertEqual(diagnostics.json()["checks"][0]["status"], "error")
 
+    def test_google_diagnostics_checks_button_queries(self) -> None:
+        main.store.insert(
+            "google_connections",
+            {
+                "account_email": "aegis@example.com",
+                "encrypted_access_token": main.secret_box.encrypt("access-token"),
+                "encrypted_refresh_token": main.secret_box.encrypt("refresh-token"),
+                "scopes": [],
+            },
+            "goog",
+        )
+        not_found = main.GoogleApiError("not found", status_code=404)
+        with patch("app.main.get_sheet_values", side_effect=not_found), patch(
+            "app.main.list_spreadsheets", return_value=[{"id": "sheet-1", "name": "Aegis Ledger"}]
+        ), patch("app.main.list_drive_files", return_value=[{"id": "file-1", "name": "receipt.pdf"}]):
+            response = self.client.get("/google/diagnostics", headers=self.headers)
+
+        checks = {item["name"]: item for item in response.json()["checks"]}
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(checks["sheets_list"]["status"], "ok")
+        self.assertEqual(checks["sheets_list"]["count"], 1)
+        self.assertEqual(checks["drive_files_list"]["status"], "ok")
+        self.assertEqual(checks["drive_files_list"]["count"], 1)
+
     def test_evidence_filename_hash_id_matching_ignores_receipt_dates(self) -> None:
         dated = main.evidence_transaction_number_from_filename("2026. 3. 1. 세미나 영수증.pdf")
         explicit = main.evidence_transaction_number_from_filename("#42# 2026. 3. 1. 세미나 영수증.pdf")

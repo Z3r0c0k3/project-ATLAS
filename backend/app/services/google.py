@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -126,6 +127,10 @@ def _api_get(url: str, access_token: str, params: dict | None = None) -> dict:
         raise GoogleApiError(f"Google API request failed: {exc.code} {detail}", exc.code) from exc
     except urllib.error.URLError as exc:
         raise GoogleApiError(f"Google API connection failed: {exc.reason}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise GoogleApiError(f"Google API request timed out: {exc}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GoogleApiError(f"Google API response could not be processed: {exc}") from exc
 
 
 def list_spreadsheets(access_token: str) -> list[dict]:
