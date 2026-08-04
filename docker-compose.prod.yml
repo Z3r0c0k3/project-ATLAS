@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       PUBLIC_FRONTEND_BASE_URL: https://${ATLAS_DOMAIN:?ATLAS_DOMAIN is required}
-      ROOT_PATH: /api
+      ROOT_PATH: ""
       CORS_ORIGINS: https://${ATLAS_DOMAIN:?ATLAS_DOMAIN is required}
       ATLAS_SECRET_KEY: ${ATLAS_SECRET_KEY:?ATLAS_SECRET_KEY is required}
       ATLAS_LOGIN_PASSWORD: ${ATLAS_LOGIN_PASSWORD:?ATLAS_LOGIN_PASSWORD is required}
@@ -13,6 +13,8 @@ services:
       ATLAS_MAX_UPLOAD_BYTES: ${ATLAS_MAX_UPLOAD_BYTES:-52428800}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend/storage:/app/storage
       - ./sample:/app/sample:ro
@@ -28,30 +30,10 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: /api
+        VITE_API_BASE_URL: https://${ATLAS_API_DOMAIN:?ATLAS_API_DOMAIN is required}
     restart: unless-stopped
     ports:
       - "127.0.0.1:5173:80"
     depends_on:
       backend:
         condition: service_healthy
-
-  caddy:
-    image: caddy:2.10-alpine
-    restart: unless-stopped
-    environment:
-      ATLAS_DOMAIN: ${ATLAS_DOMAIN:?ATLAS_DOMAIN is required}
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - frontend
-
-volumes:
-  caddy_data:
-  caddy_config:

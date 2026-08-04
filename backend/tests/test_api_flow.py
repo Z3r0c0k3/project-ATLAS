@@ -176,6 +176,47 @@ class ApiWorkflowTest(unittest.TestCase):
         stored = main.store.get("google_connections", connection["id"])
         self.assertEqual(main.secret_box.decrypt(stored["encrypted_access_token"]), "renewed-access")
 
+    def test_evidence_filename_hash_id_matching_ignores_receipt_dates(self) -> None:
+        dated = main.evidence_transaction_number_from_filename("2026. 3. 1. 세미나 영수증.pdf")
+        explicit = main.evidence_transaction_number_from_filename("#42# 2026. 3. 1. 세미나 영수증.pdf")
+
+        self.assertEqual(dated, (None, "unmatched"))
+        self.assertEqual(explicit, (42, "filename_hash_id"))
+
+    def test_transaction_crud_creates_snapshot_revisions(self) -> None:
+        snapshot = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={
+                "period": "2026년 3월",
+                "transactions": TRANSACTIONS,
+                "evidence": EVIDENCE,
+            },
+        ).json()
+
+        added = self.client.post(
+            f"/ledger-snapshots/{snapshot['id']}/transactions",
+            headers=self.headers,
+            json={"number": 3, "date": "2026-03-03", "description": "간식", "income": 0, "expense": 10_000, "balance": 1_070_000},
+        )
+        self.assertEqual(added.status_code, 200)
+        added_snapshot = added.json()
+        self.assertEqual(added_snapshot["source"]["parent_snapshot_id"], snapshot["id"])
+        self.assertEqual(added_snapshot["source"]["mutation"]["action"], "transaction.created")
+
+        updated = self.client.put(
+            f"/ledger-snapshots/{added_snapshot['id']}/transactions/3",
+            headers=self.headers,
+            json={"description": "간식 추가 구매", "expense": 12_000, "balance": 1_068_000},
+        )
+        self.assertEqual(updated.status_code, 200)
+        updated_snapshot = updated.json()
+        self.assertEqual(updated_snapshot["transactions"][-1]["description"], "간식 추가 구매")
+
+        deleted = self.client.delete(f"/ledger-snapshots/{updated_snapshot['id']}/transactions/3", headers=self.headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(len(deleted.json()["transactions"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

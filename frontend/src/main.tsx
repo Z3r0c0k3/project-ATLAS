@@ -14,16 +14,20 @@ import {
   LockKeyhole,
   RefreshCw,
   ReceiptText,
+  Save,
   Send,
   ShieldCheck,
+  SquarePen,
+  Trash2,
   Unlink,
   Upload,
 } from "lucide-react";
 import "./styles.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/+$/, "");
 
 type TransactionInput = {
+  transaction_id?: string;
   number: number;
   date: string;
   description: string;
@@ -63,16 +67,20 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!response.ok) {
-    const raw = await response.text();
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("text/html") || raw.trimStart().startsWith("<!DOCTYPE html")) {
-      throw new Error(`서버 연결에 실패했습니다 (${response.status}). ATLAS 컨테이너와 Cloudflare Tunnel 상태를 확인해주세요.`);
-    }
-    let parsed: any = null;
-    try { parsed = JSON.parse(raw); } catch { /* Plain-text API response. */ }
-    throw new Error(parsed?.detail || parsed?.message || raw || response.statusText);
+    throw await parseApiError(response);
   }
   return response.json() as Promise<T>;
+}
+
+async function parseApiError(response: Response): Promise<Error> {
+  const raw = await response.text();
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("text/html") || raw.trimStart().startsWith("<!DOCTYPE html")) {
+    return new Error(`서버 연결에 실패했습니다 (${response.status}). ATLAS 컨테이너와 Cloudflare Tunnel 상태를 확인해주세요.`);
+  }
+  let parsed: any = null;
+  try { parsed = JSON.parse(raw); } catch { /* Plain-text API response. */ }
+  return new Error(parsed?.detail || parsed?.message || raw || response.statusText);
 }
 
 function parseArray<T>(value: string): { data: T[]; error: string } {
@@ -164,6 +172,18 @@ function App() {
   const [evidenceUploads, setEvidenceUploads] = useState<any[]>([]);
   const [evidenceKind, setEvidenceKind] = useState<EvidenceInput["kind"]>("receipt");
   const [evidenceTransactionNumber, setEvidenceTransactionNumber] = useState("");
+  const [editingTransactionKey, setEditingTransactionKey] = useState("");
+  const [transactionDraft, setTransactionDraft] = useState<TransactionInput>({
+    number: 4,
+    date: "2026-03-13",
+    description: "",
+    income: 0,
+    expense: 0,
+    balance: 1080400,
+    category: "미분류",
+    note: "",
+    evidence_ids: [],
+  });
   const [googleConnection, setGoogleConnection] = useState<any>(null);
   const [snapshot, setSnapshot] = useState<any>(null);
   const [packageData, setPackageData] = useState<any>(null);
@@ -186,6 +206,38 @@ function App() {
   const totalExpense = transactions.reduce((sum, row) => sum + Number(row.expense || 0), 0);
   const computedClosing = openingBalance + totalIncome - totalExpense;
   const jsonValid = !transactionParse.error && !evidenceParse.error;
+  const selectedTransactionLabel = editingTransactionKey ? `수정 중: ${editingTransactionKey}` : "새 거래";
+
+  function syncTransactions(rows: TransactionInput[]) {
+    setTransactionsText(JSON.stringify([...rows].sort((a, b) => a.number - b.number), null, 2));
+  }
+
+  function resetTransactionDraft(rows: TransactionInput[] = transactions) {
+    const sorted = [...rows].sort((a, b) => a.number - b.number);
+    const last = sorted[sorted.length - 1];
+    setEditingTransactionKey("");
+    setTransactionDraft({
+      number: Number(last?.number || 0) + 1,
+      date: periodStart,
+      description: "",
+      income: 0,
+      expense: 0,
+      balance: Number(last?.balance ?? openingBalance),
+      category: "미분류",
+      note: "",
+      evidence_ids: [],
+    });
+  }
+
+  function selectTransactionForEdit(row: TransactionInput) {
+    setEditingTransactionKey(row.transaction_id || String(row.number));
+    setTransactionDraft({
+      ...row,
+      category: row.category || "미분류",
+      note: row.note || "",
+      evidence_ids: row.evidence_ids || [],
+    });
+  }
 
   useEffect(() => {
     if (!authToken) return;
@@ -237,8 +289,66 @@ function App() {
       headers: { "X-ATLAS-Token": authToken },
       body: form,
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw await parseApiError(response);
     return response.json();
+  }
+
+  async function saveTransactionDraft() {
+    if (!transactionDraft.date || !transactionDraft.description.trim()) {
+      setError("거래 날짜와 내용을 입력해주세요.");
+      return;
+    }
+    const normalizedDraft = {
+      ...transactionDraft,
+      number: Number(transactionDraft.number),
+      income: Number(transactionDraft.income || 0),
+      expense: Number(transactionDraft.expense || 0),
+      balance: Number(transactionDraft.balance || 0),
+      category: transactionDraft.category || "미분류",
+      note: transactionDraft.note || "",
+      evidence_ids: transactionDraft.evidence_ids || [],
+    };
+    if (snapshot?.id) {
+      const result: any = await run(editingTransactionKey ? "거래 수정 스냅샷 생성" : "거래 추가 스냅샷 생성", () => request(
+        editingTransactionKey ? `/ledger-snapshots/${snapshot.id}/transactions/${encodeURIComponent(editingTransactionKey)}` : `/ledger-snapshots/${snapshot.id}/transactions`,
+        {
+          method: editingTransactionKey ? "PUT" : "POST",
+          body: JSON.stringify(normalizedDraft),
+        },
+      ));
+      if (!result) return;
+      setSnapshot(result);
+      syncTransactions(result.transactions);
+      setEvidenceText(JSON.stringify(result.evidence, null, 2));
+      resetTransactionDraft(result.transactions);
+      return;
+    }
+    const exists = transactions.some((item) => item.number === normalizedDraft.number);
+    if (!editingTransactionKey && exists) {
+      setError("이미 같은 번호의 거래가 있습니다.");
+      return;
+    }
+    const next = editingTransactionKey
+      ? transactions.map((item) => (item.transaction_id === editingTransactionKey || String(item.number) === editingTransactionKey ? normalizedDraft : item))
+      : [...transactions, normalizedDraft];
+    syncTransactions(next);
+    resetTransactionDraft(next);
+  }
+
+  async function deleteTransaction(row: TransactionInput) {
+    const key = row.transaction_id || String(row.number);
+    if (snapshot?.id) {
+      const result: any = await run("거래 삭제 스냅샷 생성", () => request(`/ledger-snapshots/${snapshot.id}/transactions/${encodeURIComponent(key)}`, { method: "DELETE" }));
+      if (!result) return;
+      setSnapshot(result);
+      syncTransactions(result.transactions);
+      setEvidenceText(JSON.stringify(result.evidence, null, 2));
+      resetTransactionDraft(result.transactions);
+      return;
+    }
+    const next = transactions.filter((item) => item.transaction_id !== key && String(item.number) !== key);
+    syncTransactions(next);
+    resetTransactionDraft(next);
   }
 
   async function uploadWorkbook(file: File, kind: "ledger" | "bank") {
@@ -328,7 +438,7 @@ function App() {
     setBusy("제출 ZIP 다운로드"); setError("");
     try {
       const response = await fetch(`${API_BASE}/packages/${packageData.id}/download`, { headers: { "X-ATLAS-Token": authToken } });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw await parseApiError(response);
       const blobUrl = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a"); anchor.href = blobUrl; anchor.download = `${clubName}_${semester}_동연제출.zip`; anchor.click(); URL.revokeObjectURL(blobUrl);
     } catch (err) { setError(err instanceof Error ? err.message : "ZIP 다운로드 중 오류가 발생했습니다."); }
@@ -380,10 +490,33 @@ function App() {
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
                 <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 거래내역</span><small>{bankUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
-                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="장부 번호" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "여러 파일 선택 가능"}</small></div>
+                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="#ID# 없을 때 입력" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#장부ID# 파일명 자동 매칭"}</small></div>
               </div>
               {snapshot?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.reconciliation.balance_delta)}</strong><span>장부 {snapshot.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.reconciliation.matched_ledger_count}건</span></div>}
               <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>
+            </section>
+            <section className="ledger-crud">
+              <div className="panel transaction-form-panel">
+                <div className="panel-heading"><h3>장부 거래 편집</h3><StatusBadge value={selectedTransactionLabel} /></div>
+                <div className="form-grid ledger-form-grid">
+                  <label>번호<input type="number" min="1" value={transactionDraft.number} onChange={(event) => setTransactionDraft({ ...transactionDraft, number: Number(event.target.value) })} /></label>
+                  <label>날짜<input type="date" value={transactionDraft.date} onChange={(event) => setTransactionDraft({ ...transactionDraft, date: event.target.value })} /></label>
+                  <label className="wide-field">내용<input value={transactionDraft.description} onChange={(event) => setTransactionDraft({ ...transactionDraft, description: event.target.value })} /></label>
+                  <label>분류<input value={transactionDraft.category || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, category: event.target.value })} /></label>
+                  <label>수입<input type="number" value={transactionDraft.income} onChange={(event) => setTransactionDraft({ ...transactionDraft, income: Number(event.target.value) })} /></label>
+                  <label>지출<input type="number" value={transactionDraft.expense} onChange={(event) => setTransactionDraft({ ...transactionDraft, expense: Number(event.target.value) })} /></label>
+                  <label>잔액<input type="number" value={transactionDraft.balance} onChange={(event) => setTransactionDraft({ ...transactionDraft, balance: Number(event.target.value) })} /></label>
+                  <label className="wide-field">비고<input value={transactionDraft.note || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, note: event.target.value })} /></label>
+                </div>
+                <div className="button-row"><button onClick={saveTransactionDraft} disabled={!!busy}><Save size={17} /> {editingTransactionKey ? "수정 저장" : "거래 추가"}</button><button className="secondary" onClick={() => resetTransactionDraft()} disabled={!!busy}>초기화</button></div>
+              </div>
+              <div className="table-wrap ledger-table-wrap">
+                <h3>거래 목록</h3>
+                <table>
+                  <thead><tr><th>번호</th><th>날짜</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>증빙</th><th></th></tr></thead>
+                  <tbody>{transactions.map((row) => <tr key={row.transaction_id || row.number}><td>{row.number}</td><td>{row.date}</td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
+                </table>
+              </div>
             </section>
             <details className="advanced-editor"><summary>고급 데이터 편집</summary><section className="editor-grid"><label className="editor-block">거래 데이터 JSON<textarea value={transactionsText} onChange={(e) => setTransactionsText(e.target.value)} />{transactionParse.error && <span className="field-error">{transactionParse.error}</span>}</label><label className="editor-block">증빙 데이터 JSON<textarea value={evidenceText} onChange={(e) => setEvidenceText(e.target.value)} />{evidenceParse.error && <span className="field-error">{evidenceParse.error}</span>}</label></section><div className="action-bar"><button className="secondary" disabled={!jsonValid || !!busy} onClick={async () => { const result = await run("수동 스냅샷 생성", () => request("/ledger-snapshots", { method: "POST", body: JSON.stringify(snapshotPayload) })); if (result) setSnapshot(result); }}><Archive size={17} /> 수동 스냅샷 생성</button></div></details>
           </>}

@@ -5,8 +5,14 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+try:
+    from pillow_heif import register_heif_opener
+except ImportError:
+    register_heif_opener = None
+else:
+    register_heif_opener()
 
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"}
 
 
 def render_media_pages(source: Path, output_dir: Path, max_pages: int = 100) -> list[Path]:

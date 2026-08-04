@@ -106,6 +106,20 @@ class EvidenceAttachRequest(BaseModel):
     evidence_ids: list[str]
 
 
+class TransactionPatchRequest(BaseModel):
+    number: int | None = None
+    date: str | None = None
+    description: str | None = None
+    income: int | None = None
+    expense: int | None = None
+    balance: int | None = None
+    category: str | None = None
+    counterparty: str | None = None
+    note: str | None = None
+    evidence_ids: list[str] | None = None
+    evidence_id: str | None = None
+
+
 class SubmissionPackageRequest(BaseModel):
     club_name: str = "Aegis"
     organization_id: str = "aegis"

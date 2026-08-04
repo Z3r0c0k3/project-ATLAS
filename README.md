@@ -61,9 +61,11 @@ docker compose up --build
 토스 파일은 `거래 일시, 적요, 거래 유형, 거래 금액, 거래 후 잔액, 메모` 헤더로
 자동 판별한다. 파일명은 판별에 사용하지 않는다.
 
-증빙 파일명에 `2_영수증.jpg`, `NO 15-소명.pdf`처럼 1~3자리 장부 번호가 있으면
-번호를 자동 추론한다. 화면에서 번호를 지정한 경우 입력값을 우선한다. 이미지와 PDF는
-문서에 직접 삽입되고, DOCX 등 직접 표시할 수 없는 형식도 원본이 ZIP에서 빠지지 않는다.
+증빙 파일명 앞에 `#15# 2026. 3. 1. 결제 설명.pdf`처럼 `#장부ID#`를 붙이면 해당
+장부 번호로 확정 매칭한다. 화면에서 번호를 지정한 경우 입력값을 우선한다. 날짜형
+파일명(`2026. 3. 1...`)의 월/일은 장부 번호로 자동 추론하지 않는다. PDF, JPEG, PNG,
+HEIC, HEIF는 문서에 직접 삽입되고, DOCX 등 직접 표시할 수 없는 형식도 원본이 ZIP에서
+빠지지 않는다.
 
 제출 ZIP에는 다음 항목이 포함된다.
 
@@ -94,7 +96,8 @@ npm install
 npm run dev
 ```
 
-Vite와 Nginx 모두 `/api` 요청을 FastAPI로 전달하므로 브라우저는 하나의 출처만 사용한다.
+Vite와 로컬 Docker 환경은 `/api` 요청을 FastAPI로 전달하므로 브라우저는 하나의 출처만 사용한다.
+운영 Docker 환경은 Cloudflare Tunnel에 맞춰 프론트엔드와 백엔드를 서로 다른 호스트명으로 분리한다.
 
 ## 자동 테스트
 
@@ -113,7 +116,8 @@ npm audit --audit-level=moderate
 
 서버에서 `.env.example`을 `.env`로 만들고 다음 값을 반드시 변경한다.
 
-- `ATLAS_DOMAIN`: DNS가 VPS를 가리키는 실제 도메인
+- `ATLAS_DOMAIN`: 프론트엔드 공개 도메인, 예: `atlas.dkuaegis.org`
+- `ATLAS_API_DOMAIN`: 백엔드 공개 도메인, 예: `api.atlas.dkuaegis.org`
 - `ATLAS_SECRET_KEY`: OAuth와 Webhook 암호화용 긴 난수
 - `ATLAS_LOGIN_PASSWORD`: 운영 화면 로그인 비밀번호
 - `ATLAS_USER_ROLES`: 사용자명과 역할을 연결한 JSON 객체
@@ -132,20 +136,35 @@ docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml ps
 ```
 
-Caddy가 도메인의 TLS 인증서를 자동 발급하고, 외부에는 80/443 포트만 노출한다.
+운영 Compose는 Caddy 같은 리버스 프록시를 포함하지 않는다. 호스트에는 다음 포트만
+loopback으로 열린다.
 
-Cloudflare Tunnel을 사용하는 경우 Public Hostname의 서비스는
-`http://127.0.0.1:5173`으로 지정한다. 운영 Compose는 이 포트를 loopback에만
-게시하므로 외부에서는 직접 접근할 수 없고 Tunnel을 통해서만 접근한다. 배포 후에는
-원본 서버에서 `curl http://127.0.0.1:5173/api/health`가 먼저 성공해야 한다.
+- `127.0.0.1:5173`: 프론트엔드 Nginx
+- `127.0.0.1:8000`: FastAPI 백엔드
+
+Cloudflare Tunnel의 Public Hostname은 두 개를 만든다.
+
+- `atlas.dkuaegis.org` → `http://127.0.0.1:5173`
+- `api.atlas.dkuaegis.org` → `http://127.0.0.1:8000`
+
+배포 후 원본 서버에서 `curl http://127.0.0.1:5173`와
+`curl http://127.0.0.1:8000/health`가 먼저 성공해야 한다. 그 다음 외부에서
+`https://atlas.dkuaegis.org`와 `https://api.atlas.dkuaegis.org/health`를 확인한다.
 
 ## Google 연동
 
 Google Cloud Console에서 OAuth 클라이언트를 만들고 `.env`에 `GOOGLE_CLIENT_ID`와
-`GOOGLE_CLIENT_SECRET`을 설정한다. 승인된 리디렉션 URI에는 로컬 테스트용
-`http://localhost:5173/`와 운영 주소 `https://<ATLAS_DOMAIN>/`를 등록한다.
+`GOOGLE_CLIENT_SECRET`을 설정한다. 현재 ATLAS OAuth 콜백은 프론트엔드에서 처리하므로
+승인된 리디렉션 URI에는 로컬 테스트용 `http://localhost:5173/`와 운영 주소
+`https://<ATLAS_DOMAIN>/`를 등록한다. 백엔드 도메인 `https://<ATLAS_API_DOMAIN>/`는
+Google OAuth 리디렉션 URI가 아니라 API 호출과 CORS 대상이다.
 ATLAS는 계정 이메일과 읽기 전용 Sheets/Drive Scope만 요청하며 OAuth `state`는
 로그인 세션에 묶고 한 번 사용하면 폐기한다.
+
+승인된 JavaScript 원본에는 `http://localhost:5173`와 `https://<ATLAS_DOMAIN>`을
+등록한다. Google 계정 연결은 성공했는데 Sheets/Drive 버튼에서 502가 뜬다면
+리디렉션 URI보다 Cloudflare Tunnel의 `api.<도메인>` 라우팅과 백엔드 컨테이너 상태를
+먼저 확인한다.
 
 - `GET /auth/google/authorize-url`
 - `POST /auth/google/connect`
@@ -161,6 +180,9 @@ ATLAS는 계정 이메일과 읽기 전용 Sheets/Drive Scope만 요청하며 OA
 - `POST /imports/workbook-snapshot`
 - `POST /evidence/upload`
 - `POST /ledger-snapshots/{snapshot_id}/evidence`
+- `POST /ledger-snapshots/{snapshot_id}/transactions`
+- `PUT /ledger-snapshots/{snapshot_id}/transactions/{transaction_id_or_number}`
+- `DELETE /ledger-snapshots/{snapshot_id}/transactions/{transaction_id_or_number}`
 - `GET /ledger-snapshots/{snapshot_id}`
 
 ## 운영 주의사항

@@ -29,6 +29,8 @@ from .models import (
     PackageReviewRequest,
     Role,
     SubmissionPackageRequest,
+    TransactionInput,
+    TransactionPatchRequest,
     WorkbookSnapshotRequest,
 )
 from .services.accounting import (
@@ -188,6 +190,45 @@ def snapshot_summary(snapshot: dict) -> dict:
         "created_at": snapshot.get("created_at"),
         "reconciliation": (snapshot.get("source") or {}).get("reconciliation"),
     }
+
+
+def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None, str]:
+    stem = Path(filename).stem
+    explicit = re.search(r"#\s*(\d{1,6})\s*#", stem)
+    if explicit:
+        return int(explicit.group(1)), "filename_hash_id"
+    labeled = re.search(r"(?:^|[ _-])(?:no|tx|ledger|장부)[ ._#-]*(\d{1,6})(?:[ ._#-]|$)", stem, re.IGNORECASE)
+    if labeled:
+        return int(labeled.group(1)), "filename_labeled_id"
+    return None, "unmatched"
+
+
+def create_snapshot_revision(
+    current: dict,
+    transactions: list[dict],
+    evidence: list[dict],
+    session: dict,
+    mutation: dict,
+) -> dict:
+    normalized_transactions = normalize_transactions(transactions)
+    normalized_evidence = normalize_evidence(evidence)
+    source = {**current.get("source", {}), "parent_snapshot_id": current["id"], "mutation": mutation}
+    return store.insert(
+        "ledger_snapshots",
+        {
+            **snapshot_payload(
+                current["organization_id"],
+                current["account_id"],
+                current["period"],
+                normalized_transactions,
+                normalized_evidence,
+                source,
+            ),
+            "imported_by": session["username"],
+            "imported_role": session["role"],
+        },
+        "snap",
+    )
 
 
 def resolve_snapshot_for_package(payload: SubmissionPackageRequest, session: dict) -> dict:
@@ -507,14 +548,15 @@ def upload_evidence(
         raise HTTPException(status_code=422, detail="Unsupported evidence kind")
     target, size = persist_upload(file, "evidence")
     inferred_number = transaction_number
+    match_method = "manual" if transaction_number is not None else "unmatched"
     if inferred_number is None:
-        match = re.search(r"(?:^|[ _-])(?:no[ ._-]?)?(\d{1,3})(?:[ ._-]|$)", target.stem, re.IGNORECASE)
-        if match:
-            inferred_number = int(match.group(1))
+        inferred_number, match_method = evidence_transaction_number_from_filename(target.name)
     row = store.insert(
         "evidence",
         {
             "transaction_number": inferred_number,
+            "match_method": match_method,
+            "match_confidence": "confirmed" if inferred_number is not None else "unmatched",
             "transaction_ids": [value.strip() for value in transaction_ids.split(",") if value.strip()],
             "filename": target.name,
             "kind": kind,
@@ -672,6 +714,94 @@ def get_ledger_snapshot(
     return snapshot
 
 
+@app.post("/ledger-snapshots/{snapshot_id}/transactions")
+def add_snapshot_transaction(
+    snapshot_id: str,
+    payload: TransactionInput,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    current = store.get("ledger_snapshots", snapshot_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+    transactions = [dict(item) for item in current.get("transactions", [])]
+    if any(int(item["number"]) == payload.number for item in transactions):
+        raise HTTPException(status_code=409, detail="Transaction number already exists")
+    transactions.append(payload.model_dump(mode="json"))
+    transactions.sort(key=lambda item: (str(item.get("date") or ""), int(item.get("number") or 0)))
+    created = create_snapshot_revision(
+        current,
+        transactions,
+        current.get("evidence", []),
+        session,
+        {"action": "transaction.created", "transaction_number": payload.number},
+    )
+    audit(session, "ledger.transaction.created", "ledger_snapshot", created["id"], before={"parent_snapshot_id": snapshot_id}, after={"transaction_number": payload.number}, request=request)
+    return created
+
+
+@app.put("/ledger-snapshots/{snapshot_id}/transactions/{transaction_key}")
+def update_snapshot_transaction(
+    snapshot_id: str,
+    transaction_key: str,
+    payload: TransactionPatchRequest,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    current = store.get("ledger_snapshots", snapshot_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+    patch = payload.model_dump(exclude_none=True, mode="json")
+    transactions = [dict(item) for item in current.get("transactions", [])]
+    updated_number: int | None = None
+    for index, item in enumerate(transactions):
+        if item.get("transaction_id") == transaction_key or str(item.get("number")) == transaction_key:
+            updated = {**item, **patch}
+            updated_number = int(updated["number"])
+            transactions[index] = updated
+            break
+    if updated_number is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    duplicate_numbers = [int(item["number"]) for item in transactions]
+    if len(duplicate_numbers) != len(set(duplicate_numbers)):
+        raise HTTPException(status_code=409, detail="Transaction number already exists")
+    transactions.sort(key=lambda item: (str(item.get("date") or ""), int(item.get("number") or 0)))
+    created = create_snapshot_revision(
+        current,
+        transactions,
+        current.get("evidence", []),
+        session,
+        {"action": "transaction.updated", "transaction_key": transaction_key, "transaction_number": updated_number},
+    )
+    audit(session, "ledger.transaction.updated", "ledger_snapshot", created["id"], before={"parent_snapshot_id": snapshot_id, "transaction_key": transaction_key}, after={"patch": patch}, request=request)
+    return created
+
+
+@app.delete("/ledger-snapshots/{snapshot_id}/transactions/{transaction_key}")
+def delete_snapshot_transaction(
+    snapshot_id: str,
+    transaction_key: str,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    current = store.get("ledger_snapshots", snapshot_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+    transactions = [dict(item) for item in current.get("transactions", [])]
+    remaining = [item for item in transactions if item.get("transaction_id") != transaction_key and str(item.get("number")) != transaction_key]
+    if len(remaining) == len(transactions):
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    created = create_snapshot_revision(
+        current,
+        remaining,
+        current.get("evidence", []),
+        session,
+        {"action": "transaction.deleted", "transaction_key": transaction_key},
+    )
+    audit(session, "ledger.transaction.deleted", "ledger_snapshot", created["id"], before={"parent_snapshot_id": snapshot_id, "transaction_key": transaction_key}, after={"transaction_count": len(remaining)}, request=request)
+    return created
+
+
 @app.post("/ledger-snapshots/{snapshot_id}/evidence")
 def attach_snapshot_evidence(
     snapshot_id: str,
@@ -697,24 +827,12 @@ def attach_snapshot_evidence(
                 if item["id"] not in linked:
                     linked.append(item["id"])
         transaction["evidence_ids"] = linked
-    normalized_transactions = normalize_transactions(transactions)
-    normalized_evidence = normalize_evidence(evidence_by_id.values())
-    source = {**current.get("source", {}), "parent_snapshot_id": snapshot_id}
-    created = store.insert(
-        "ledger_snapshots",
-        {
-            **snapshot_payload(
-                current["organization_id"],
-                current["account_id"],
-                current["period"],
-                normalized_transactions,
-                normalized_evidence,
-                source,
-            ),
-            "imported_by": session["username"],
-            "imported_role": session["role"],
-        },
-        "snap",
+    created = create_snapshot_revision(
+        current,
+        transactions,
+        list(evidence_by_id.values()),
+        session,
+        {"action": "evidence.attached", "evidence_ids": payload.evidence_ids},
     )
     audit(
         session,
@@ -722,7 +840,7 @@ def attach_snapshot_evidence(
         "ledger_snapshot",
         created["id"],
         before={"parent_snapshot_id": snapshot_id},
-        after={"evidence_count": len(normalized_evidence)},
+        after={"evidence_count": len(evidence_by_id)},
         request=request,
     )
     return created

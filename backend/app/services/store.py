@@ -82,6 +82,15 @@ class JsonStore:
             self._write_unlocked(collection, rows)
             return rows[item_id]
 
+    def delete(self, collection: str, item_id: str) -> dict[str, Any]:
+        with self._lock:
+            rows = self._read_unlocked(collection)
+            if item_id not in rows:
+                raise KeyError(item_id)
+            deleted = rows.pop(item_id)
+            self._write_unlocked(collection, rows)
+            return deleted
+
     def append_audit(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             rows = self._read_unlocked("audit_logs")
