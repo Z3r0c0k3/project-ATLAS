@@ -265,10 +265,16 @@ def current_google_connection() -> dict | None:
 
 
 def google_access_token(connection: dict, force_refresh: bool = False) -> str:
-    token = secret_box.decrypt(connection.get("encrypted_access_token"))
+    try:
+        token = secret_box.decrypt(connection.get("encrypted_access_token"))
+    except ValueError as exc:
+        raise GoogleApiError("Stored Google access token cannot be decrypted. Reconnect the Google account after confirming ATLAS_SECRET_KEY.", 409) from exc
     if token and not force_refresh:
         return token
-    refresh_token = secret_box.decrypt(connection.get("encrypted_refresh_token"))
+    try:
+        refresh_token = secret_box.decrypt(connection.get("encrypted_refresh_token"))
+    except ValueError as exc:
+        raise GoogleApiError("Stored Google refresh token cannot be decrypted. Reconnect the Google account after confirming ATLAS_SECRET_KEY.", 409) from exc
     if not refresh_token:
         raise GoogleApiError("Google refresh token is not available")
     token = refresh_access_token(refresh_token)
@@ -283,6 +289,11 @@ def call_google_api(connection: dict, operation):
         if exc.status_code != 401 or not connection.get("encrypted_refresh_token"):
             raise
     return operation(google_access_token(connection, force_refresh=True))
+
+
+def raise_google_http_error(exc: GoogleApiError) -> None:
+    status_code = exc.status_code if exc.status_code in {400, 401, 403, 409, 429} else 502
+    raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
 
 def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> list[dict]:
@@ -375,7 +386,7 @@ def google_authorize_url(
     try:
         return {"authorization_url": build_authorization_url(redirect_uri, state_row["id"]), "state": state_row["id"]}
     except GoogleApiError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise_google_http_error(exc)
 
 
 @app.post("/auth/google/connect")
@@ -396,7 +407,7 @@ def connect_google(
         try:
             tokens = exchange_authorization_code(payload.authorization_code, payload.redirect_uri)
         except GoogleApiError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise_google_http_error(exc)
         store.update("oauth_states", oauth_state["id"], {"consumed_at": utc_now()})
     access_token = payload.access_token or tokens.get("access_token")
     refresh_token = payload.refresh_token or tokens.get("refresh_token")
@@ -405,7 +416,7 @@ def connect_google(
         try:
             account_email = google_account_email(access_token)
         except GoogleApiError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise_google_http_error(exc)
     if not account_email:
         raise HTTPException(status_code=422, detail="account_email or a Google authorization code is required")
     connection = store.insert(
@@ -446,6 +457,43 @@ def disconnect_google(
     return {"connected": False}
 
 
+@app.get("/google/diagnostics")
+def google_diagnostics(
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    connection = current_google_connection()
+    status_payload = google_connection_status(connection)
+    diagnostics = {
+        "connection": status_payload,
+        "configured": {
+            "client_id": bool(os.getenv("GOOGLE_CLIENT_ID")),
+            "client_secret": bool(os.getenv("GOOGLE_CLIENT_SECRET")),
+        },
+        "stored_tokens": {
+            "access_token": bool(connection and connection.get("encrypted_access_token")),
+            "refresh_token": bool(connection and connection.get("encrypted_refresh_token")),
+        },
+        "checks": [],
+    }
+    if not connection:
+        diagnostics["checks"].append({"name": "connection", "status": "missing", "message": "Google account is not connected."})
+        return diagnostics
+    try:
+        google_access_token(connection)
+    except GoogleApiError as exc:
+        diagnostics["checks"].append({"name": "access_token", "status": "error", "message": str(exc), "status_code": exc.status_code})
+        return diagnostics
+    diagnostics["checks"].append({"name": "access_token", "status": "ok"})
+    try:
+        call_google_api(connection, lambda token: get_sheet_values(token, "invalid-diagnostics-spreadsheet-id", "A1:A1"))
+    except GoogleApiError as exc:
+        # A Google 400/403 here proves outbound Google API connectivity and credential handling reached Google.
+        diagnostics["checks"].append({"name": "google_api_reachable", "status": "ok" if exc.status_code in {400, 403, 404} else "error", "message": str(exc), "status_code": exc.status_code})
+        return diagnostics
+    diagnostics["checks"].append({"name": "google_api_reachable", "status": "ok"})
+    return diagnostics
+
+
 @app.get("/google/sheets")
 def get_google_sheets(
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
@@ -456,7 +504,7 @@ def get_google_sheets(
     try:
         return {"connection": google_connection_status(connection), "sheets": call_google_api(connection, list_spreadsheets)}
     except GoogleApiError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise_google_http_error(exc)
 
 
 @app.get("/google/drive/files")
@@ -469,7 +517,7 @@ def get_google_drive_files(
     try:
         return {"connection": google_connection_status(connection), "files": call_google_api(connection, list_drive_files)}
     except GoogleApiError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise_google_http_error(exc)
 
 
 @app.post("/google/sheets/{spreadsheet_id}/snapshot")
@@ -484,7 +532,7 @@ def snapshot_google_sheet(
     try:
         result = call_google_api(connection, lambda token: get_sheet_values(token, spreadsheet_id, payload.range))
     except GoogleApiError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise_google_http_error(exc)
     transactions = parse_google_sheet_rows(result.get("values", []), payload.opening_balance)
     snapshot = create_snapshot(
         LedgerSnapshotRequest(

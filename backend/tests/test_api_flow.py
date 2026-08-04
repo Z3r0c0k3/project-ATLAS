@@ -176,6 +176,27 @@ class ApiWorkflowTest(unittest.TestCase):
         stored = main.store.get("google_connections", connection["id"])
         self.assertEqual(main.secret_box.decrypt(stored["encrypted_access_token"]), "renewed-access")
 
+    def test_google_token_decryption_failure_requests_reconnect(self) -> None:
+        foreign_box = main.SecretBox("different-secret")
+        main.store.insert(
+            "google_connections",
+            {
+                "account_email": "aegis@example.com",
+                "encrypted_access_token": foreign_box.encrypt("access-token"),
+                "encrypted_refresh_token": foreign_box.encrypt("refresh-token"),
+                "scopes": [],
+            },
+            "goog",
+        )
+
+        response = self.client.get("/google/sheets", headers=self.headers)
+        diagnostics = self.client.get("/google/diagnostics", headers=self.headers)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Reconnect the Google account", response.json()["detail"])
+        self.assertEqual(diagnostics.status_code, 200)
+        self.assertEqual(diagnostics.json()["checks"][0]["status"], "error")
+
     def test_evidence_filename_hash_id_matching_ignores_receipt_dates(self) -> None:
         dated = main.evidence_transaction_number_from_filename("2026. 3. 1. 세미나 영수증.pdf")
         explicit = main.evidence_transaction_number_from_filename("#42# 2026. 3. 1. 세미나 영수증.pdf")
