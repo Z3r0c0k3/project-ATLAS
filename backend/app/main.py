@@ -21,6 +21,7 @@ from .models import (
     EvidenceAttachRequest,
     GoogleConnectRequest,
     GoogleSheetSnapshotRequest,
+    GoogleSheetUrlSnapshotRequest,
     LedgerSnapshotRequest,
     LoginRequest,
     MonthlyReportRequest,
@@ -72,6 +73,7 @@ MAX_UPLOAD_BYTES = int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)
 PUBLIC_FRONTEND_BASE_URL = os.getenv("PUBLIC_FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 LOGIN_PASSWORD = os.getenv("ATLAS_LOGIN_PASSWORD")
+DEFAULT_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_LEDGER_SHEET_URL", "")
 try:
     USER_ROLES = json.loads(os.getenv("ATLAS_USER_ROLES", "{}"))
 except json.JSONDecodeError as exc:
@@ -329,6 +331,51 @@ def parse_google_sheet_rows(values: list[list[Any]], opening_balance: int) -> li
     return parsed
 
 
+def extract_spreadsheet_id(spreadsheet_url_or_id: str) -> str:
+    candidate = spreadsheet_url_or_id.strip()
+    if not candidate:
+        raise HTTPException(status_code=422, detail="Google Sheet URL or ID is required")
+    url_match = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", candidate)
+    if url_match:
+        return url_match.group(1)
+    id_match = re.fullmatch(r"[A-Za-z0-9_-]{20,}", candidate)
+    if id_match:
+        return candidate
+    raise HTTPException(status_code=422, detail="Invalid Google Sheet URL or ID")
+
+
+def create_google_sheet_snapshot(spreadsheet_id: str, payload: GoogleSheetSnapshotRequest, session: dict) -> dict:
+    connection = current_google_connection()
+    if not connection:
+        raise HTTPException(status_code=409, detail="Google account is not connected")
+    try:
+        result = call_google_api(connection, lambda token: get_sheet_values(token, spreadsheet_id, payload.range))
+    except GoogleApiError as exc:
+        raise_google_http_error(exc)
+    transactions = parse_google_sheet_rows(result.get("values", []), payload.opening_balance)
+    snapshot = create_snapshot(
+        LedgerSnapshotRequest(
+            organization_id=payload.organization_id,
+            account_id=payload.account_id,
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=result.get("range"),
+            period=payload.period,
+            period_start=payload.period_start,
+            period_end=payload.period_end,
+            transactions=transactions,
+        ),
+        session,
+        "google_sheets",
+        {"range": payload.range, "google_value_range": result.get("range"), "row_count": len(result.get("values", []))},
+    )
+    return {
+        **snapshot_summary(snapshot),
+        "transactions": snapshot["transactions"],
+        "evidence": snapshot["evidence"],
+        "google": {"spreadsheet_id": spreadsheet_id, "range": result.get("range"), "row_count": len(result.get("values", []))},
+    }
+
+
 def persist_upload(file: UploadFile, folder: str = "imports") -> tuple[Path, int]:
     upload_id = f"upload_{secrets.token_urlsafe(8)}"
     filename = Path(file.filename or "upload.bin").name
@@ -356,6 +403,13 @@ def health() -> dict:
         "version": app.version,
         "auth_mode": "mapped_password" if LOGIN_PASSWORD and USER_ROLES else ("password" if LOGIN_PASSWORD else "demo"),
     }
+
+
+@app.get("/config/defaults")
+def get_config_defaults(
+    session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
+) -> dict:
+    return {"default_ledger_sheet_url": DEFAULT_LEDGER_SHEET_URL}
 
 
 @app.post("/auth/login", response_model=AuthSession)
@@ -529,35 +583,21 @@ def get_google_drive_files(
         raise_google_http_error(exc)
 
 
+@app.post("/google/sheets/snapshot")
+def snapshot_google_sheet_from_url(
+    payload: GoogleSheetUrlSnapshotRequest,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    return create_google_sheet_snapshot(extract_spreadsheet_id(payload.spreadsheet_url_or_id), payload, session)
+
+
 @app.post("/google/sheets/{spreadsheet_id}/snapshot")
 def snapshot_google_sheet(
     spreadsheet_id: str,
     payload: GoogleSheetSnapshotRequest,
     session: dict = Depends(require_roles(Role.admin, Role.accountant)),
 ) -> dict:
-    connection = current_google_connection()
-    if not connection:
-        raise HTTPException(status_code=409, detail="Google account is not connected")
-    try:
-        result = call_google_api(connection, lambda token: get_sheet_values(token, spreadsheet_id, payload.range))
-    except GoogleApiError as exc:
-        raise_google_http_error(exc)
-    transactions = parse_google_sheet_rows(result.get("values", []), payload.opening_balance)
-    snapshot = create_snapshot(
-        LedgerSnapshotRequest(
-            organization_id=payload.organization_id,
-            account_id=payload.account_id,
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=result.get("range"),
-            period=payload.period,
-            period_start=payload.period_start,
-            period_end=payload.period_end,
-            transactions=transactions,
-        ),
-        session,
-        "google_sheets",
-    )
-    return snapshot_summary(snapshot)
+    return create_google_sheet_snapshot(spreadsheet_id, payload, session)
 
 
 @app.post("/imports/upload")

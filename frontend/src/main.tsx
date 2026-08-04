@@ -188,6 +188,8 @@ function App() {
     evidence_ids: [],
   });
   const [googleConnection, setGoogleConnection] = useState<any>(null);
+  const [googleSheetSource, setGoogleSheetSource] = useState("");
+  const [googleSheetRange, setGoogleSheetRange] = useState("A:G");
   const [snapshot, setSnapshot] = useState<any>(null);
   const [packageData, setPackageData] = useState<any>(null);
   const [job, setJob] = useState<any>(null);
@@ -244,6 +246,9 @@ function App() {
 
   useEffect(() => {
     if (!authToken) return;
+    api<any>("/config/defaults", { headers: { "X-ATLAS-Token": authToken } }).then((result) => {
+      setGoogleSheetSource((current) => current || result.default_ledger_sheet_url || "");
+    }).catch(() => undefined);
     const params = new URLSearchParams(window.location.search);
     const authorizationCode = params.get("code");
     const oauthState = params.get("state");
@@ -459,6 +464,34 @@ function App() {
     if (result.ledger?.period_end) setPeriodEnd(result.ledger.period_end);
   }
 
+  async function importGoogleSheet() {
+    if (!googleSheetSource.trim()) {
+      setError("Google 회계장부 URL 또는 ID를 입력해주세요.");
+      return;
+    }
+    const result: any = await run("Google 장부 스냅샷 생성", () => request("/google/sheets/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        spreadsheet_url_or_id: googleSheetSource.trim(),
+        range: googleSheetRange.trim() || "A:G",
+        period: semester,
+        period_start: periodStart || null,
+        period_end: periodEnd || null,
+        opening_balance: Number(openingBalance || 0),
+        organization_id: "aegis",
+        account_id: "primary",
+      }),
+    }));
+    if (!result) return;
+    setSnapshot(result);
+    setTransactionsText(JSON.stringify(result.transactions || [], null, 2));
+    setEvidenceText(JSON.stringify(result.evidence || [], null, 2));
+    const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
+    const last = sortedTransactions[sortedTransactions.length - 1];
+    if (last?.balance !== undefined) setExpectedClosingBalance(Number(last.balance));
+    resetTransactionDraft(result.transactions || []);
+  }
+
   async function attachEvidenceToSnapshot() {
     if (!snapshot?.id || !evidenceUploads.length) return;
     const result: any = await run("증빙 반영 스냅샷 생성", () => request(`/ledger-snapshots/${snapshot.id}/evidence`, {
@@ -548,7 +581,21 @@ function App() {
             <section className="section-head"><div><p className="eyebrow">LEDGER SOURCE</p><h2>장부 스냅샷</h2><p>제출과 공개 자료는 생성 시점의 해시가 고정된 스냅샷을 사용합니다.</p></div>{snapshot && <StatusBadge value="SNAPSHOT SAVED" />}</section>
             <section className="workspace-grid">
               <div className="panel"><h3>회계 기본 정보</h3><div className="form-grid"><label>동아리명<input value={clubName} onChange={(e) => setClubName(e.target.value)} /></label><label>회계 기간<input value={semester} onChange={(e) => setSemester(e.target.value)} /></label><label>시작일<input type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} /></label><label>종료일<input type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} /></label><label>이전 잔액<input type="number" value={openingBalance} onChange={(e) => setOpeningBalance(Number(e.target.value))} /></label><label>최종 잔액<input type="number" value={expectedClosingBalance} onChange={(e) => setExpectedClosingBalance(Number(e.target.value))} /></label></div></div>
-              <div className="panel"><div className="panel-heading"><h3>Google 자료 연결</h3>{googleConnection && <StatusBadge value={googleConnection.connected ? "CONNECTED" : "DISCONNECTED"} />}</div><p className="muted">{googleConnection?.connected ? `${googleConnection.account_email} · 읽기 전용 연결` : "운영 계정의 Sheets 장부와 Drive 증빙을 읽기 전용으로 연결합니다."}</p><div className="button-row">{googleConnection?.connected ? <button className="secondary danger" onClick={disconnectGoogle}>연결 해제</button> : <button onClick={beginGoogleConnect}>Google 계정 연결</button>}<button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Google 진단", () => request("/google/diagnostics"))}>Google 진단</button><button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Sheets 조회", () => request("/google/sheets"))}>Google Sheets</button><button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Drive 조회", () => request("/google/drive/files"))}>Google Drive</button></div></div>
+              <div className="panel">
+                <div className="panel-heading"><h3>Google 자료 연결</h3>{googleConnection && <StatusBadge value={googleConnection.connected ? "CONNECTED" : "DISCONNECTED"} />}</div>
+                <p className="muted">{googleConnection?.connected ? `${googleConnection.account_email} · 읽기 전용 연결` : "운영 계정의 Sheets 장부와 Drive 증빙을 읽기 전용으로 연결합니다."}</p>
+                <div className="form-grid single google-import-form">
+                  <label>회계장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
+                  <label>가져올 범위<input value={googleSheetRange} onChange={(event) => setGoogleSheetRange(event.target.value)} placeholder="A:G 또는 시트명!A:G" /></label>
+                </div>
+                <div className="button-row">
+                  {googleConnection?.connected ? <button className="secondary danger" onClick={disconnectGoogle}>연결 해제</button> : <button onClick={beginGoogleConnect}>Google 계정 연결</button>}
+                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleSheet}><FileSpreadsheet size={17} /> Google 장부 가져오기</button>
+                  <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Google 진단", () => request("/google/diagnostics"))}>Google 진단</button>
+                  <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Sheets 조회", () => request("/google/sheets"))}>Google Sheets</button>
+                  <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Drive 조회", () => request("/google/drive/files"))}>Google Drive</button>
+                </div>
+              </div>
             </section>
             <section className="import-surface">
               <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div>{snapshot?.reconciliation && <StatusBadge value={snapshot.reconciliation.status} />}</div>

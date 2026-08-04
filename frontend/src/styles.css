@@ -41,6 +41,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; over
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .panel-heading h3 { margin-bottom: 0; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }.form-grid.single { grid-template-columns: 1fr; }
+.google-import-form { margin: 12px 0; }
 .editor-block { border: 1px solid #d5dde0; border-radius: 7px; background: #fff; }
 .field-error { color: #a43f31; font-size: 12px; }.muted { color: #6d7e84; font-size: 13px; line-height: 1.55; }
 .button-row, .action-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }

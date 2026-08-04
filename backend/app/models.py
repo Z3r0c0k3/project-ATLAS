@@ -210,4 +210,8 @@ class GoogleSheetSnapshotRequest(BaseModel):
     opening_balance: int = 0
 
 
+class GoogleSheetUrlSnapshotRequest(GoogleSheetSnapshotRequest):
+    spreadsheet_url_or_id: str = Field(min_length=1)
+
+
 EvidenceKind = Literal["receipt", "explanation", "account_capture", "other"]

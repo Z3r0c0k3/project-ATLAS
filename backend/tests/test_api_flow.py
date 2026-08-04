@@ -226,6 +226,46 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(checks["drive_files_list"]["status"], "ok")
         self.assertEqual(checks["drive_files_list"]["count"], 1)
 
+    def test_google_sheet_url_import_creates_ledger_snapshot(self) -> None:
+        main.store.insert(
+            "google_connections",
+            {
+                "account_email": "aegis@example.com",
+                "encrypted_access_token": main.secret_box.encrypt("access-token"),
+                "encrypted_refresh_token": main.secret_box.encrypt("refresh-token"),
+                "scopes": [],
+            },
+            "goog",
+        )
+        sheet_values = {
+            "range": "A:G",
+            "values": [
+                ["번호", "날짜", "내용", "수입금액", "지출금액", "잔액", "비고"],
+                [1, "2026-03-01", "회비", 100000, 0, 1100000, ""],
+                [2, "2026-03-02", "현수막", 0, 20000, 1080000, "영수증"],
+            ],
+        }
+        with patch("app.main.get_sheet_values", return_value=sheet_values) as values_mock:
+            response = self.client.post(
+                "/google/sheets/snapshot",
+                headers=self.headers,
+                json={
+                    "spreadsheet_url_or_id": "https://example.test/spreadsheets/d/test-ledger-sheet-id-1234567890/edit",
+                    "range": "A:G",
+                    "period": "2026년 1학기",
+                    "period_start": "2026-03-01",
+                    "period_end": "2026-06-30",
+                    "opening_balance": 1000000,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        imported = response.json()
+        self.assertEqual(imported["source"]["spreadsheet_id"], "test-ledger-sheet-id-1234567890")
+        self.assertEqual(imported["transaction_count"], 2)
+        self.assertEqual(imported["transactions"][1]["description"], "현수막")
+        values_mock.assert_called_once_with("access-token", "test-ledger-sheet-id-1234567890", "A:G")
+
     def test_google_service_disabled_error_is_human_readable(self) -> None:
         detail = {
             "error": {
@@ -248,6 +288,17 @@ class ApiWorkflowTest(unittest.TestCase):
 
         self.assertIn("Google Drive API is disabled", message)
         self.assertIn("project=13429015435", message)
+
+    def test_default_ledger_sheet_url_comes_from_server_env(self) -> None:
+        previous_default = main.DEFAULT_LEDGER_SHEET_URL
+        main.DEFAULT_LEDGER_SHEET_URL = "https://example.test/spreadsheets/d/test-ledger-sheet-id-1234567890"
+        try:
+            response = self.client.get("/config/defaults", headers=self.headers)
+        finally:
+            main.DEFAULT_LEDGER_SHEET_URL = previous_default
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["default_ledger_sheet_url"], "https://example.test/spreadsheets/d/test-ledger-sheet-id-1234567890")
 
     def test_evidence_filename_hash_id_matching_ignores_receipt_dates(self) -> None:
         dated = main.evidence_transaction_number_from_filename("2026. 3. 1. 세미나 영수증.pdf")

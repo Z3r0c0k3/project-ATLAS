@@ -188,7 +188,13 @@ Google Drive API를 Enable하고 몇 분 뒤 다시 시도한다.
 - `POST /auth/google/disconnect`
 - `GET /google/sheets`
 - `GET /google/drive/files`
+- `POST /google/sheets/snapshot`
 - `POST /google/sheets/{spreadsheet_id}/snapshot`
+
+운영 장부는 화면의 `Google 자료 연결` 패널에서 Google 계정 연결 후 회계장부 URL 또는
+스프레드시트 ID를 입력하고 `Google 장부 가져오기`를 누르면 ATLAS 스냅샷으로 저장된다.
+운영에서 기본 장부 URL을 미리 채우려면 `.env`에 `ATLAS_DEFAULT_LEDGER_SHEET_URL`을 설정한다.
+시트 탭 이름이 필요한 경우 범위를 `시트명!A:G` 형식으로 입력한다.
 
 파일 기반 운영 API:
 
