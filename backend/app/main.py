@@ -60,7 +60,9 @@ from .services.security import SecretBox, mask_webhook_url, sanitize_secret_fiel
 from .services.store import JsonStore, utc_now
 from .services.workbooks import (
     WorkbookParseError,
+    is_ibk_bank_pdf,
     parse_aegis_ledger,
+    parse_ibk_bank_pdf,
     parse_toss_bank,
     reconcile_ledger_bank,
     workbook_preview,
@@ -668,6 +670,11 @@ def upload_import(
             analysis = workbook_preview(target)
         except WorkbookParseError as exc:
             parse_error = str(exc)
+    elif target.suffix.lower() == ".pdf" and is_ibk_bank_pdf(target):
+        try:
+            analysis = workbook_preview(target)
+        except WorkbookParseError as exc:
+            parse_error = str(exc)
     row = store.insert(
         "uploads",
         {
@@ -783,7 +790,11 @@ def create_workbook_snapshot(
         if not bank_upload:
             raise HTTPException(status_code=404, detail="Bank upload not found")
         try:
-            bank = parse_toss_bank(Path(bank_upload["path"]))
+            bank_path = Path(bank_upload["path"])
+            if is_ibk_bank_pdf(bank_path):
+                bank = parse_ibk_bank_pdf(bank_path)
+            else:
+                bank = parse_toss_bank(bank_path)
             reconciliation = reconcile_ledger_bank(ledger, bank)
         except WorkbookParseError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

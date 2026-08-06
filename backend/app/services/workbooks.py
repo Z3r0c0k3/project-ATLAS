@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import fitz
 from openpyxl import load_workbook
 
 from .integrity import canonical_sha256, file_sha256
@@ -106,6 +107,21 @@ def detect_workbook(path: Path) -> dict:
         "sha256": file_sha256(path),
         "sheets": matches,
     }
+
+
+IBK_BANK_KEYWORDS = ("거래내역조회_입출식", "기업은행", "IBK간편한통장")
+
+
+def is_ibk_bank_pdf(path: Path) -> bool:
+    if path.suffix.lower() != ".pdf":
+        return False
+    try:
+        doc = fitz.open(str(path))
+        text = doc[0].get_text()
+        doc.close()
+        return any(keyword in text for keyword in IBK_BANK_KEYWORDS)
+    except Exception:
+        return False
 
 
 def _category(description: str, method: str) -> str:
@@ -425,6 +441,17 @@ def reconcile_ledger_bank(ledger: dict, bank: dict) -> dict:
 
 
 def workbook_preview(path: Path) -> dict:
+    if is_ibk_bank_pdf(path):
+        parsed = parse_ibk_bank_pdf(path)
+        return {
+            "kind": parsed["kind"],
+            "sha256": parsed["sha256"],
+            "summary": {
+                key: parsed[key]
+                for key in ("transaction_count", "period_start", "period_end", "total_inflow", "total_outflow", "closing_balance", "account_number", "account_holder")
+            },
+            "preview": parsed["transactions"][:10],
+        }
     detected = detect_workbook(path)
     kind = detected["kind"]
     if kind == "aegis_ledger":
@@ -448,3 +475,127 @@ def workbook_preview(path: Path) -> dict:
             "preview": parsed["transactions"][:10],
         }
     return detected
+
+
+def _clean_cell(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\u00a0", " ")).strip()
+
+
+def parse_ibk_bank_pdf(path: Path) -> dict:
+    if path.suffix.lower() != ".pdf":
+        raise WorkbookParseError("PDF 파일만 가능합니다.")
+    try:
+        doc = fitz.open(str(path))
+    except Exception as exc:
+        raise WorkbookParseError(f"PDF 파일을 열 수 없습니다: {normalize_filename(path.name)}") from exc
+
+    account_info: dict[str, str] = {}
+    all_rows: list[dict] = []
+
+    for page in doc:
+        text = page.get_text()
+        if not account_info:
+            for line in text.split("\n"):
+                line = line.strip()
+                if line.startswith("계좌번호"):
+                    account_info["account_number"] = line.split(":", 1)[-1].strip() if ":" in line else line.replace("계좌번호", "").strip()
+                elif line.startswith("예금주명"):
+                    account_info["account_holder"] = line.split(":", 1)[-1].strip() if ":" in line else line.replace("예금주명", "").strip()
+                elif line.startswith("조회시작일자"):
+                    account_info["query_start"] = line.split(":", 1)[-1].strip() if ":" in line else line.replace("조회시작일자", "").strip()
+                elif line.startswith("조회종료일자"):
+                    account_info["query_end"] = line.split(":", 1)[-1].strip() if ":" in line else line.replace("조회종료일자", "").strip()
+
+        tables = page.find_tables()
+        if not tables.tables:
+            continue
+        table = tables.tables[0]
+        extracted = table.extract()
+        if not extracted:
+            continue
+
+        for row in extracted:
+            if not row or not row[0]:
+                continue
+            first_cell = _clean_cell(str(row[0]))
+            if first_cell in ("No", "합계"):
+                continue
+            if not re.fullmatch(r"\d+", first_cell):
+                continue
+
+            date_time = _clean_cell(str(row[1])).replace("\n", " ")
+            withdrawal = _money(row[2] if len(row) > 2 else 0)
+            deposit = _money(row[3] if len(row) > 3 else 0)
+            balance = _money(row[4] if len(row) > 4 else 0)
+            description = _clean_cell(str(row[5]) if len(row) > 5 else "").replace("\n", "")
+            transfer_message = _clean_cell(str(row[6]) if len(row) > 6 else "").replace("\n", "")
+            counterparty_account = _clean_cell(str(row[7]) if len(row) > 7 else "").replace("\n", "")
+            counterparty_bank = _clean_cell(str(row[8]) if len(row) > 8 else "").replace("\n", "")
+            transaction_type = _clean_cell(str(row[9]) if len(row) > 9 else "").replace("\n", "")
+            check_amount = _money(row[10] if len(row) > 10 else 0)
+            cms_code = _clean_cell(str(row[11]) if len(row) > 11 else "").replace("\n", "")
+            counterparty_name = _clean_cell(str(row[12]) if len(row) > 12 else "").replace("\n", "")
+
+            occurred_at = _parse_date(date_time)
+            if not occurred_at:
+                occurred_at = _parse_date(date_time[:10])
+
+            signed_amount = deposit - withdrawal
+
+            row_data = {
+                "occurred_at": occurred_at.isoformat(timespec="seconds") if occurred_at else date_time,
+                "date": occurred_at.date().isoformat() if occurred_at else date_time[:10],
+                "description": description or counterparty_name or "기업은행 거래",
+                "withdrawal": withdrawal,
+                "deposit": deposit,
+                "amount": signed_amount,
+                "balance": balance,
+                "transfer_message": transfer_message,
+                "counterparty_account": counterparty_account,
+                "counterparty_bank": counterparty_bank,
+                "transaction_type": transaction_type,
+                "check_amount": check_amount,
+                "cms_code": cms_code,
+                "counterparty_name": counterparty_name,
+                "number": int(first_cell),
+            }
+            row_data["bank_transaction_id"] = f"bank_{canonical_sha256(row_data)[:16]}"
+            all_rows.append(row_data)
+
+    doc.close()
+
+    if not all_rows:
+        raise WorkbookParseError("기업은행 PDF에서 유효한 거래 내역을 찾지 못했습니다.")
+
+    all_rows.sort(key=lambda row: (row["date"], row["number"]))
+
+    continuity_failures: list[dict] = []
+    for previous, current in zip(all_rows, all_rows[1:]):
+        expected = previous["balance"] + current["amount"]
+        if expected != current["balance"]:
+            continuity_failures.append({
+                "previous_id": previous["bank_transaction_id"],
+                "transaction_id": current["bank_transaction_id"],
+                "expected_balance": expected,
+                "reported_balance": current["balance"],
+            })
+
+    return {
+        "kind": "ibk_bank",
+        "filename": normalize_filename(path.name),
+        "sha256": file_sha256(path),
+        "account_number": account_info.get("account_number", ""),
+        "account_holder": account_info.get("account_holder", ""),
+        "query_start": account_info.get("query_start", ""),
+        "query_end": account_info.get("query_end", ""),
+        "opening_balance": all_rows[0]["balance"] - all_rows[0]["amount"],
+        "closing_balance": all_rows[-1]["balance"],
+        "period_start": all_rows[0]["date"],
+        "period_end": all_rows[-1]["date"],
+        "total_inflow": sum(max(row["amount"], 0) for row in all_rows),
+        "total_outflow": sum(max(-row["amount"], 0) for row in all_rows),
+        "transaction_count": len(all_rows),
+        "transaction_types": dict(Counter(row["transaction_type"] for row in all_rows)),
+        "continuity_failures": continuity_failures,
+        "transactions": all_rows,
+    }
