@@ -49,6 +49,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; over
 .file-button { min-height: 40px; border: 1px solid #b8c6ca; border-radius: 6px; padding: 0 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }.file-button input { display: none; }
 .import-surface { margin-bottom: 14px; padding: 18px; border: 1px solid #cdd7da; border-radius: 7px; background: #eef2f3; }
 .import-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }.import-heading h3 { margin: 0; font-size: 17px; }
+.import-account-select select { width: auto; min-width: 200px; height: 34px; font-size: 12px; }
 .upload-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .upload-slot { min-height: 148px; border: 1px dashed #9dafb4; border-radius: 6px; background: #fff; color: #34525a; padding: 16px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; overflow: hidden; }
 .upload-slot:not(.evidence-slot) { position: relative; cursor: pointer; }.upload-slot:not(.evidence-slot) > input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }

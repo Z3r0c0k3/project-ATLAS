@@ -54,17 +54,6 @@ type EvidenceInput = {
   evidence_date?: string;
 };
 
-const initialTransactions: TransactionInput[] = [
-  { number: 1, date: "2026-03-01", description: "3월 동아리 회비", income: 340000, expense: 0, balance: 1340000, category: "회비", note: "20,000 * 17명" },
-  { number: 2, date: "2026-03-04", description: "동아리 홍보용 X배너", income: 0, expense: 22000, balance: 1318000, category: "홍보", evidence_ids: ["ev-banner"] },
-  { number: 3, date: "2026-03-12", description: "동아리 행사 굿즈", income: 0, expense: 237600, balance: 1080400, category: "행사", evidence_ids: ["ev-goods"] },
-];
-
-const initialEvidence: EvidenceInput[] = [
-  { id: "ev-banner", transaction_number: 2, filename: "banner_receipt.png", kind: "receipt", accessible: true, amount: 22000, evidence_date: "2026-03-04" },
-  { id: "ev-goods", transaction_number: 3, filename: "goods_receipt.pdf", kind: "receipt", accessible: true, amount: 237600, evidence_date: "2026-03-12" },
-];
-
 type Tab = "ledger" | "package" | "public" | "discord" | "history";
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -86,15 +75,6 @@ async function parseApiError(response: Response): Promise<Error> {
   let parsed: any = null;
   try { parsed = JSON.parse(raw); } catch { /* Plain-text API response. */ }
   return new Error(parsed?.detail || parsed?.message || raw || response.statusText);
-}
-
-function parseArray<T>(value: string): { data: T[]; error: string } {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? { data: parsed, error: "" } : { data: [], error: "배열 형식이어야 합니다." };
-  } catch {
-    return { data: [], error: "JSON 문법을 확인해주세요." };
-  }
 }
 
 function money(value: number): string {
@@ -170,10 +150,15 @@ function App() {
   const [treasurerName, setTreasurerName] = useState("회계담당자");
   const [presidentName, setPresidentName] = useState("회장");
   const [reviewerName, setReviewerName] = useState("검토자");
-  const [transactionsText, setTransactionsText] = useState(JSON.stringify(initialTransactions, null, 2));
-  const [evidenceText, setEvidenceText] = useState(JSON.stringify(initialEvidence, null, 2));
+  const [primarySnapshot, setPrimarySnapshot] = useState<any>(null);
+  const [duesSnapshot, setDuesSnapshot] = useState<any>(null);
+  const [primaryTransactions, setPrimaryTransactions] = useState<TransactionInput[]>([]);
+  const [primaryEvidence, setPrimaryEvidence] = useState<EvidenceInput[]>([]);
+  const [duesTransactions, setDuesTransactions] = useState<TransactionInput[]>([]);
+  const [duesEvidence, setDuesEvidence] = useState<EvidenceInput[]>([]);
   const [ledgerUpload, setLedgerUpload] = useState<any>(null);
   const [bankUpload, setBankUpload] = useState<any>(null);
+  const [ledgerAccountId, setLedgerAccountId] = useState<"primary" | "dues_intake">("primary");
   const [evidenceUploads, setEvidenceUploads] = useState<any[]>([]);
   const [evidenceKind, setEvidenceKind] = useState<EvidenceInput["kind"]>("receipt");
   const [evidenceTransactionNumber, setEvidenceTransactionNumber] = useState("");
@@ -181,12 +166,12 @@ function App() {
   const [accountFilter, setAccountFilter] = useState<"primary" | "dues_intake" | "all">("all");
   const [editingTransactionKey, setEditingTransactionKey] = useState("");
   const [transactionDraft, setTransactionDraft] = useState<TransactionInput>({
-    number: 4,
-    date: "2026-03-13",
+    number: 1,
+    date: "",
     description: "",
     income: 0,
     expense: 0,
-    balance: 1080400,
+    balance: 0,
     category: "미분류",
     processing_method: "",
     details: "",
@@ -197,7 +182,6 @@ function App() {
   const [googleConnection, setGoogleConnection] = useState<any>(null);
   const [googleSheetSource, setGoogleSheetSource] = useState("");
   const [googleSheetRange, setGoogleSheetRange] = useState("B:I");
-  const [snapshot, setSnapshot] = useState<any>(null);
   const [packageData, setPackageData] = useState<any>(null);
   const [job, setJob] = useState<any>(null);
   const [report, setReport] = useState<any>(null);
@@ -210,18 +194,78 @@ function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
 
-  const transactionParse = useMemo(() => parseArray<TransactionInput>(transactionsText), [transactionsText]);
-  const evidenceParse = useMemo(() => parseArray<EvidenceInput>(evidenceText), [evidenceText]);
-  const transactions = transactionParse.data;
-  const evidence = evidenceParse.data;
+  const transactions = useMemo(() => {
+    const merged = [...primaryTransactions, ...duesTransactions];
+    return merged.sort((a, b) => a.number - b.number);
+  }, [primaryTransactions, duesTransactions]);
+
+  const evidence = useMemo(() => {
+    return [...primaryEvidence, ...duesEvidence];
+  }, [primaryEvidence, duesEvidence]);
+
+  const transactionsText = useMemo(() => JSON.stringify(transactions, null, 2), [transactions]);
+  const evidenceText = useMemo(() => JSON.stringify(evidence, null, 2), [evidence]);
+
+  function accountDataFor(accountId: string) {
+    if (accountId === "dues_intake") {
+      return {
+        transactions: duesTransactions,
+        evidence: duesEvidence,
+        setTransactions: setDuesTransactions,
+        setEvidence: setDuesEvidence,
+        snapshot: duesSnapshot,
+        setSnapshot: setDuesSnapshot,
+      };
+    }
+    return {
+      transactions: primaryTransactions,
+      evidence: primaryEvidence,
+      setTransactions: setPrimaryTransactions,
+      setEvidence: setPrimaryEvidence,
+      snapshot: primarySnapshot,
+      setSnapshot: setPrimarySnapshot,
+    };
+  }
+
+  function setAccountTransactions(accountId: string, txns: TransactionInput[]) {
+    if (accountId === "dues_intake") {
+      setDuesTransactions([...txns].sort((a, b) => a.number - b.number));
+    } else {
+      setPrimaryTransactions([...txns].sort((a, b) => a.number - b.number));
+    }
+  }
+
+  function setAccountEvidence(accountId: string, ev: EvidenceInput[]) {
+    if (accountId === "dues_intake") {
+      setDuesEvidence([...ev]);
+    } else {
+      setPrimaryEvidence([...ev]);
+    }
+  }
+
+  function setAccountSnapshot(accountId: string, snap: any) {
+    if (accountId === "dues_intake") {
+      setDuesSnapshot(snap);
+    } else {
+      setPrimarySnapshot(snap);
+    }
+  }
+
+  const activeAccountId = accountFilter === "dues_intake" ? "dues_intake" : "primary";
+  const snapshot = accountFilter === "dues_intake" ? duesSnapshot : primarySnapshot;
+  const snapshotPayload = { organization_id: "aegis", account_id: activeAccountId, period: semester, period_start: periodStart, period_end: periodEnd, transactions, evidence };
+
   const totalIncome = transactions.reduce((sum, row) => sum + Number(row.income || 0), 0);
   const totalExpense = transactions.reduce((sum, row) => sum + Number(row.expense || 0), 0);
   const computedClosing = openingBalance + totalIncome - totalExpense;
-  const jsonValid = !transactionParse.error && !evidenceParse.error;
   const selectedTransactionLabel = editingTransactionKey ? `수정 중: ${editingTransactionKey}` : "새 거래";
 
-  function syncTransactions(rows: TransactionInput[]) {
-    setTransactionsText(JSON.stringify([...rows].sort((a, b) => a.number - b.number), null, 2));
+  function updateTransactionInAccount(accountId: string, updater: (prev: TransactionInput[]) => TransactionInput[]) {
+    if (accountId === "dues_intake") {
+      setDuesTransactions((prev) => updater([...prev]).sort((a, b) => a.number - b.number));
+    } else {
+      setPrimaryTransactions((prev) => updater([...prev]).sort((a, b) => a.number - b.number));
+    }
   }
 
   function resetTransactionDraft(rows: TransactionInput[] = transactions) {
@@ -355,7 +399,7 @@ function App() {
       setError("거래 날짜와 내용을 입력해주세요.");
       return;
     }
-    const normalizedDraft = {
+    const normalizedDraft: TransactionInput = {
       ...transactionDraft,
       number: Number(transactionDraft.number),
       income: Number(transactionDraft.income || 0),
@@ -368,47 +412,53 @@ function App() {
       evidence_ids: transactionDraft.evidence_ids || [],
       account_id: transactionDraft.account_id || activeAccountId,
     };
-    if (snapshot?.id) {
+    const acctId = normalizedDraft.account_id || "primary";
+    const acctSnapshot = acctId === "dues_intake" ? duesSnapshot : primarySnapshot;
+    if (acctSnapshot?.id) {
       const result: any = await run(editingTransactionKey ? "거래 수정 스냅샷 생성" : "거래 추가 스냅샷 생성", () => request(
-        editingTransactionKey ? `/ledger-snapshots/${snapshot.id}/transactions/${encodeURIComponent(editingTransactionKey)}` : `/ledger-snapshots/${snapshot.id}/transactions`,
+        editingTransactionKey ? `/ledger-snapshots/${acctSnapshot.id}/transactions/${encodeURIComponent(editingTransactionKey)}` : `/ledger-snapshots/${acctSnapshot.id}/transactions`,
         {
           method: editingTransactionKey ? "PUT" : "POST",
           body: JSON.stringify(normalizedDraft),
         },
       ));
       if (!result) return;
-      setSnapshot(result);
-      syncTransactions(result.transactions);
-      setEvidenceText(JSON.stringify(result.evidence, null, 2));
-      resetTransactionDraft(result.transactions);
+      setAccountSnapshot(acctId, result);
+      setAccountTransactions(acctId, result.transactions);
+      setAccountEvidence(acctId, result.evidence);
+      resetTransactionDraft([...primaryTransactions, ...duesTransactions]);
       return;
     }
-    const exists = transactions.some((item) => item.number === normalizedDraft.number);
+    const currentTxn = acctId === "dues_intake" ? duesTransactions : primaryTransactions;
+    const exists = currentTxn.some((item) => item.number === normalizedDraft.number);
     if (!editingTransactionKey && exists) {
       setError("이미 같은 번호의 거래가 있습니다.");
       return;
     }
     const next = editingTransactionKey
-      ? transactions.map((item) => (item.transaction_id === editingTransactionKey || String(item.number) === editingTransactionKey ? normalizedDraft : item))
-      : [...transactions, normalizedDraft];
-    syncTransactions(next);
-    resetTransactionDraft(next);
+      ? currentTxn.map((item) => (item.transaction_id === editingTransactionKey || String(item.number) === editingTransactionKey ? normalizedDraft : item))
+      : [...currentTxn, normalizedDraft];
+    setAccountTransactions(acctId, next);
+    resetTransactionDraft([...(acctId === "dues_intake" ? primaryTransactions : next), ...(acctId === "dues_intake" ? next : duesTransactions)]);
   }
 
   async function deleteTransaction(row: TransactionInput) {
     const key = row.transaction_id || String(row.number);
-    if (snapshot?.id) {
-      const result: any = await run("거래 삭제 스냅샷 생성", () => request(`/ledger-snapshots/${snapshot.id}/transactions/${encodeURIComponent(key)}`, { method: "DELETE" }));
+    const acctId = row.account_id || "primary";
+    const acctSnapshot = acctId === "dues_intake" ? duesSnapshot : primarySnapshot;
+    if (acctSnapshot?.id) {
+      const result: any = await run("거래 삭제 스냅샷 생성", () => request(`/ledger-snapshots/${acctSnapshot.id}/transactions/${encodeURIComponent(key)}`, { method: "DELETE" }));
       if (!result) return;
-      setSnapshot(result);
-      syncTransactions(result.transactions);
-      setEvidenceText(JSON.stringify(result.evidence, null, 2));
-      resetTransactionDraft(result.transactions);
+      setAccountSnapshot(acctId, result);
+      setAccountTransactions(acctId, result.transactions);
+      setAccountEvidence(acctId, result.evidence);
+      resetTransactionDraft([...primaryTransactions, ...duesTransactions]);
       return;
     }
-    const next = transactions.filter((item) => item.transaction_id !== key && String(item.number) !== key);
-    syncTransactions(next);
-    resetTransactionDraft(next);
+    const currentTxn = acctId === "dues_intake" ? duesTransactions : primaryTransactions;
+    const next = currentTxn.filter((item) => item.transaction_id !== key && String(item.number) !== key);
+    setAccountTransactions(acctId, next);
+    resetTransactionDraft([...(acctId === "dues_intake" ? primaryTransactions : next), ...(acctId === "dues_intake" ? next : duesTransactions)]);
   }
 
   useEffect(() => {
@@ -454,10 +504,13 @@ function App() {
     });
     if (result) {
       setEvidenceUploads((current) => [...current, ...result]);
-      setEvidenceText((current) => {
-        const parsed = parseArray<EvidenceInput>(current).data;
-        return JSON.stringify([...parsed.filter((item) => !result.some((added: any) => added.id === item.id)), ...result], null, 2);
-      });
+      const targetAccountId = result[0]?.account_id || "primary";
+      setAccountEvidence(targetAccountId, [
+        ...(targetAccountId === "dues_intake" ? duesEvidence : primaryEvidence).filter(
+          (item) => !result.some((added: any) => added.id === item.id)
+        ),
+        ...result,
+      ]);
     }
   }
 
@@ -469,6 +522,7 @@ function App() {
         ledger_upload_id: ledgerUpload.id,
         bank_upload_id: bankUpload?.id || null,
         evidence_ids: evidenceUploads.map((item) => item.id),
+        account_id: ledgerAccountId,
         period: semester,
         period_start: null,
         period_end: null,
@@ -476,9 +530,9 @@ function App() {
       }),
     }));
     if (!result) return;
-    setSnapshot(result);
-    setTransactionsText(JSON.stringify(result.transactions, null, 2));
-    setEvidenceText(JSON.stringify(result.evidence, null, 2));
+    setAccountSnapshot(ledgerAccountId, result);
+    setAccountTransactions(ledgerAccountId, result.transactions);
+    setAccountEvidence(ledgerAccountId, result.evidence);
     setOpeningBalance(Number(result.ledger?.opening_balance || 0));
     setExpectedClosingBalance(Number(result.ledger?.closing_balance || 0));
     if (result.ledger?.period_start) setPeriodStart(result.ledger.period_start);
@@ -504,13 +558,13 @@ function App() {
       }),
     }));
     if (!result) return;
-    setSnapshot(result);
-    setTransactionsText(JSON.stringify(result.transactions || [], null, 2));
-    setEvidenceText(JSON.stringify(result.evidence || [], null, 2));
+    setAccountSnapshot("primary", result);
+    setAccountTransactions("primary", result.transactions || []);
+    setAccountEvidence("primary", result.evidence || []);
     const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
     const last = sortedTransactions[sortedTransactions.length - 1];
     if (last?.balance !== undefined) setExpectedClosingBalance(Number(last.balance));
-    resetTransactionDraft(result.transactions || []);
+    resetTransactionDraft([...(result.transactions || []), ...duesTransactions]);
   }
 
   async function importGoogleDuesSheet() {
@@ -532,29 +586,27 @@ function App() {
       }),
     }));
     if (!result) return;
-    setSnapshot(result);
-    setTransactionsText(JSON.stringify(result.transactions || [], null, 2));
-    setEvidenceText(JSON.stringify(result.evidence || [], null, 2));
+    setAccountSnapshot("dues_intake", result);
+    setAccountTransactions("dues_intake", result.transactions || []);
+    setAccountEvidence("dues_intake", result.evidence || []);
     const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
     const last = sortedTransactions[sortedTransactions.length - 1];
     if (last?.balance !== undefined) setExpectedClosingBalance(Number(last.balance));
-    resetTransactionDraft(result.transactions || []);
+    resetTransactionDraft([...primaryTransactions, ...(result.transactions || [])]);
   }
 
   async function attachEvidenceToSnapshot() {
-    if (!snapshot?.id || !evidenceUploads.length) return;
-    const result: any = await run("증빙 반영 스냅샷 생성", () => request(`/ledger-snapshots/${snapshot.id}/evidence`, {
+    const targetSnapshot = activeAccountId === "dues_intake" ? duesSnapshot : primarySnapshot;
+    if (!targetSnapshot?.id || !evidenceUploads.length) return;
+    const result: any = await run("증빙 반영 스냅샷 생성", () => request(`/ledger-snapshots/${targetSnapshot.id}/evidence`, {
       method: "POST",
       body: JSON.stringify({ evidence_ids: evidenceUploads.map((item) => item.id) }),
     }));
     if (!result) return;
-    setSnapshot(result);
-    setTransactionsText(JSON.stringify(result.transactions, null, 2));
-    setEvidenceText(JSON.stringify(result.evidence, null, 2));
+    setAccountSnapshot(activeAccountId, result);
+    setAccountTransactions(activeAccountId, result.transactions);
+    setAccountEvidence(activeAccountId, result.evidence);
   }
-
-  const activeAccountId = accountFilter === "dues_intake" ? "dues_intake" : "primary";
-  const snapshotPayload = { organization_id: "aegis", account_id: activeAccountId, period: semester, period_start: periodStart, period_end: periodEnd, transactions, evidence };
 
   async function downloadPackage() {
     if (!packageData?.id || !authToken) return;
@@ -576,7 +628,7 @@ function App() {
           ...snapshotPayload,
           club_name: clubName,
           semester,
-          snapshot_id: snapshot?.id,
+snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnapshot?.id,
           treasurer_name: treasurerName,
           president_name: presidentName,
           reviewer_name: reviewerName,
@@ -650,13 +702,13 @@ function App() {
               </div>
             </section>
             <section className="import-surface">
-              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div>{snapshot?.reconciliation && <StatusBadge value={snapshot.reconciliation.status} />}</div>
+              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => setLedgerAccountId(event.target.value as "primary" | "dues_intake")}><option value="primary">운영계좌 (토스뱅크)</option><option value="dues_intake">회비입금계좌 (기업은행)</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
                 <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 / IBK 거래내역</span><small>{bankUpload?.filename || ".xlsx / .pdf"}</small><input type="file" accept=".xlsx,.xlsm,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
                 <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="수동 번호 (파일명 없을 때)" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#장부ID# → 운영계좌 · *장부ID* → 회비계좌 자동 매칭"}</small></div>
               </div>
-              {snapshot?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.reconciliation.balance_delta)}</strong><span>장부 {snapshot.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.reconciliation.matched_ledger_count}건</span></div>}
+              {snapshot?.source?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.source.reconciliation.balance_delta)}</strong><span>장부 {snapshot.source.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.source.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.source.reconciliation.matched_ledger_count}건</span></div>}
               <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>
             </section>
             <section className="ledger-crud">
@@ -691,20 +743,20 @@ function App() {
                 </table>
               </div>
             </section>
-            <details className="advanced-editor"><summary>고급 데이터 편집</summary><section className="editor-grid"><label className="editor-block">거래 데이터 JSON<textarea value={transactionsText} onChange={(e) => setTransactionsText(e.target.value)} />{transactionParse.error && <span className="field-error">{transactionParse.error}</span>}</label><label className="editor-block">증빙 데이터 JSON<textarea value={evidenceText} onChange={(e) => setEvidenceText(e.target.value)} />{evidenceParse.error && <span className="field-error">{evidenceParse.error}</span>}</label></section><div className="action-bar"><button className="secondary" disabled={!jsonValid || !!busy} onClick={async () => { const result = await run("수동 스냅샷 생성", () => request("/ledger-snapshots", { method: "POST", body: JSON.stringify(snapshotPayload) })); if (result) setSnapshot(result); }}><Archive size={17} /> 수동 스냅샷 생성</button></div></details>
+            <details className="advanced-editor"><summary>고급 데이터 보기</summary><section className="editor-grid"><label className="editor-block">운영계좌 거래 데이터<textarea readOnly value={JSON.stringify(primaryTransactions, null, 2)} /></label><label className="editor-block">회비계좌 거래 데이터<textarea readOnly value={JSON.stringify(duesTransactions, null, 2)} /></label></section></details>
           </>}
 
           {activeTab === "package" && <>
             <section className="section-head"><div><p className="eyebrow">SUBMISSION PACKAGE</p><h2>동아리연합회 제출본</h2><p>생성, 검토 요청, 승인 이력을 버전 단위로 보존합니다.</p></div>{packageData && <StatusBadge value={packageData.status} />}</section>
             <section className="workspace-grid"><div className="panel"><h3>서명 정보</h3><div className="form-grid"><label>회계담당자<input value={treasurerName} onChange={(e) => setTreasurerName(e.target.value)} /></label><label>회장<input value={presidentName} onChange={(e) => setPresidentName(e.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(e) => setReviewerName(e.target.value)} /></label></div></div><div className="panel"><h3>현재 작업</h3>{job ? <div className="job-state"><RefreshCw className={job.status === "running" ? "spin" : ""} size={20} /><div><strong>{job.status}</strong><span>{jobIdOf(job)}</span></div></div> : <p className="muted">생성 요청 전입니다.</p>}{packageData?.validation && <div className="validation-line"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div>}{packageData?.document_coverage && <div className="coverage-grid"><span>장부 <strong>{packageData.document_coverage.ledger_transaction_rows}건 / {packageData.document_coverage.ledger_row_capacity}칸</strong></span><span>증빙 삽입 <strong>{packageData.document_coverage.evidence_document.embedded_files}개</strong></span><span>계좌 캡처 <strong>{packageData.document_coverage.account_document.embedded_capture_pages}쪽</strong></span><span>은행 거래 <strong>{packageData.document_coverage.account_document.bank_transaction_rows}건</strong></span></div>}</div></section>
-            <div className="action-bar"><button disabled={!jsonValid || !!busy} onClick={createPackageJob}><FileArchive size={17} /> 패키지 생성</button><button className="secondary" disabled={!jobIdOf(job) || !!busy} onClick={refreshCurrentJob}><RefreshCw size={17} /> 상태 확인</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button></div>
+            <div className="action-bar"><button disabled={!!busy} onClick={createPackageJob}><FileArchive size={17} /> 패키지 생성</button><button className="secondary" disabled={!jobIdOf(job) || !!busy} onClick={refreshCurrentJob}><RefreshCw size={17} /> 상태 확인</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button></div>
             {packageData?.zip_sha256 && <section className="integrity"><ShieldCheck size={20} /><div><strong>ZIP 무결성</strong><code>{packageData.zip_sha256}</code></div></section>}
           </>}
 
           {activeTab === "public" && <>
             <section className="section-head"><div><p className="eyebrow">MEMBER DISCLOSURE</p><h2>월간 회원 공개</h2><p>긴 난수 토큰을 사용하며 링크를 즉시 폐기하거나 재발급할 수 있습니다.</p></div>{report && <StatusBadge value={report.status || "active"} />}</section>
             <section className="workspace-grid"><div className="panel"><h3>공개 설정</h3><div className="form-grid"><label>공개 월<input value={month} onChange={(e) => setMonth(e.target.value)} /></label><label>만료일<input type="datetime-local" id="report-expiry" /></label></div></div><div className="panel"><h3>공개 범위</h3><ul className="privacy-list"><li>거래 상대방 및 계좌번호 제외</li><li>증빙 ID·원본 경로 제외</li><li>내부 비고 기본 비공개</li><li>검색엔진 색인 차단</li></ul></div></section>
-            <div className="action-bar"><button disabled={!jsonValid || !!busy} onClick={async () => { const expiry = (document.getElementById("report-expiry") as HTMLInputElement)?.value; const result: any = await run("월간 공개 생성", () => request("/monthly-reports", { method: "POST", body: JSON.stringify({ club_name: clubName, month, snapshot_id: snapshot?.id, opening_balance: openingBalance, transactions, evidence, visible_notes: false, expires_at: expiry ? new Date(expiry).toISOString() : null, allow_download: false }) })); if (result) setReport({ ...result, status: "active" }); }}><Link2 size={17} /> 공개 페이지 생성</button><button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button><button className="secondary danger" disabled={!report?.report_id || report?.status === "revoked"} onClick={async () => { const result: any = await run("링크 폐기", () => request(`/monthly-reports/${report.report_id}/revoke`, { method: "POST" })); if (result) setReport({ ...report, status: "revoked" }); }}><Unlink size={17} /> 링크 폐기</button><button className="secondary" disabled={!report?.report_id} onClick={async () => { const result: any = await run("링크 재발급", () => request(`/monthly-reports/${report.report_id}/regenerate-link`, { method: "POST" })); if (result) setReport({ ...report, ...result }); }}><RefreshCw size={17} /> 재발급</button></div>
+            <div className="action-bar"><button disabled={!!busy} onClick={async () => { const expiry = (document.getElementById("report-expiry") as HTMLInputElement)?.value; const result: any = await run("월간 공개 생성", () => request("/monthly-reports", { method: "POST", body: JSON.stringify({ club_name: clubName, month, snapshot_id: primarySnapshot?.id, opening_balance: openingBalance, transactions, evidence, visible_notes: false, expires_at: expiry ? new Date(expiry).toISOString() : null, allow_download: false }) })); if (result) setReport({ ...result, status: "active" }); }}><Link2 size={17} /> 공개 페이지 생성</button><button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button><button className="secondary danger" disabled={!report?.report_id || report?.status === "revoked"} onClick={async () => { const result: any = await run("링크 폐기", () => request(`/monthly-reports/${report.report_id}/revoke`, { method: "POST" })); if (result) setReport({ ...report, status: "revoked" }); }}><Unlink size={17} /> 링크 폐기</button><button className="secondary" disabled={!report?.report_id} onClick={async () => { const result: any = await run("링크 재발급", () => request(`/monthly-reports/${report.report_id}/regenerate-link`, { method: "POST" })); if (result) setReport({ ...report, ...result }); }}><RefreshCw size={17} /> 재발급</button></div>
             {report?.public_url && <div className="link-output"><Link2 size={17} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a></div>}
           </>}
 
