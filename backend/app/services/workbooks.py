@@ -567,7 +567,7 @@ def parse_ibk_bank_pdf(path: Path) -> dict:
     if not all_rows:
         raise WorkbookParseError("기업은행 PDF에서 유효한 거래 내역을 찾지 못했습니다.")
 
-    all_rows.sort(key=lambda row: (row["date"], row["number"]))
+    all_rows.sort(key=lambda row: (row["date"], row["occurred_at"], row["number"]))
 
     continuity_failures: list[dict] = []
     for previous, current in zip(all_rows, all_rows[1:]):
