@@ -75,6 +75,7 @@ PUBLIC_FRONTEND_BASE_URL = os.getenv("PUBLIC_FRONTEND_BASE_URL", "http://localho
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 LOGIN_PASSWORD = os.getenv("ATLAS_LOGIN_PASSWORD")
 DEFAULT_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_LEDGER_SHEET_URL", "")
+DEFAULT_DUES_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_DUES_LEDGER_SHEET_URL", "")
 try:
     USER_ROLES = json.loads(os.getenv("ATLAS_USER_ROLES", "{}"))
 except json.JSONDecodeError as exc:
@@ -202,10 +203,10 @@ def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None
         return int(dues.group(1)), "filename_dues_star_id", "dues_intake"
     explicit = re.search(r"#\s*(\d{1,6})\s*#", stem)
     if explicit:
-        return int(explicit.group(1)), "filename_hash_id", None
+        return int(explicit.group(1)), "filename_hash_id", "primary"
     labeled = re.search(r"(?:^|[ _-])(?:no|tx|ledger|장부)[ ._#-]*(\d{1,6})(?:[ ._#-]|$)", stem, re.IGNORECASE)
     if labeled:
-        return int(labeled.group(1)), "filename_labeled_id", None
+        return int(labeled.group(1)), "filename_labeled_id", "primary"
     return None, "unmatched", None
 
 
@@ -458,7 +459,10 @@ def health() -> dict:
 def get_config_defaults(
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
 ) -> dict:
-    return {"default_ledger_sheet_url": DEFAULT_LEDGER_SHEET_URL}
+    return {
+        "default_ledger_sheet_url": DEFAULT_LEDGER_SHEET_URL,
+        "default_dues_ledger_sheet_url": DEFAULT_DUES_LEDGER_SHEET_URL,
+    }
 
 
 @app.post("/auth/login", response_model=AuthSession)
@@ -687,7 +691,6 @@ def upload_evidence(
     request: Request,
     file: UploadFile = File(...),
     kind: str = Form("other"),
-    account_id: str | None = Form(None),
     transaction_number: int | None = Form(None),
     transaction_ids: str = Form(""),
     amount: int | None = Form(None),
@@ -697,13 +700,11 @@ def upload_evidence(
     if kind not in {"receipt", "explanation", "account_capture", "other"}:
         raise HTTPException(status_code=422, detail="Unsupported evidence kind")
     target, size = persist_upload(file, "evidence")
-    inferred_number = transaction_number
-    inferred_account_id = account_id or "primary"
-    match_method = "manual" if transaction_number is not None else "unmatched"
-    if inferred_number is None:
-        inferred_number, match_method, account_hint = evidence_transaction_number_from_filename(target.name)
-        if account_hint and not account_id:
-            inferred_account_id = account_hint
+    inferred_number, match_method, account_hint = evidence_transaction_number_from_filename(target.name)
+    inferred_account_id = account_hint or "primary"
+    if inferred_number is None and transaction_number is not None:
+        inferred_number = transaction_number
+        match_method = "manual"
     row = store.insert(
         "evidence",
         {

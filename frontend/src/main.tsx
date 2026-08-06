@@ -29,6 +29,7 @@ const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
 
 type TransactionInput = {
   transaction_id?: string;
+  account_id?: string;
   number: number;
   date: string;
   description: string;
@@ -175,8 +176,9 @@ function App() {
   const [bankUpload, setBankUpload] = useState<any>(null);
   const [evidenceUploads, setEvidenceUploads] = useState<any[]>([]);
   const [evidenceKind, setEvidenceKind] = useState<EvidenceInput["kind"]>("receipt");
-  const [evidenceAccountId, setEvidenceAccountId] = useState("primary");
   const [evidenceTransactionNumber, setEvidenceTransactionNumber] = useState("");
+  const [duesSheetSource, setDuesSheetSource] = useState("");
+  const [accountFilter, setAccountFilter] = useState<"primary" | "dues_intake" | "all">("all");
   const [editingTransactionKey, setEditingTransactionKey] = useState("");
   const [transactionDraft, setTransactionDraft] = useState<TransactionInput>({
     number: 4,
@@ -190,6 +192,7 @@ function App() {
     details: "",
     note: "",
     evidence_ids: [],
+    account_id: "primary",
   });
   const [googleConnection, setGoogleConnection] = useState<any>(null);
   const [googleSheetSource, setGoogleSheetSource] = useState("");
@@ -237,6 +240,7 @@ function App() {
       details: "",
       note: "",
       evidence_ids: [],
+      account_id: activeAccountId,
     });
   }
 
@@ -256,6 +260,7 @@ function App() {
     if (!authToken) return;
     api<any>("/config/defaults", { headers: { "X-ATLAS-Token": authToken } }).then((result) => {
       setGoogleSheetSource((current) => current || result.default_ledger_sheet_url || "");
+      setDuesSheetSource((current) => current || result.default_dues_ledger_sheet_url || "");
     }).catch(() => undefined);
     const params = new URLSearchParams(window.location.search);
     const authorizationCode = params.get("code");
@@ -361,6 +366,7 @@ function App() {
       details: transactionDraft.details || "",
       note: transactionDraft.note || "",
       evidence_ids: transactionDraft.evidence_ids || [],
+      account_id: transactionDraft.account_id || activeAccountId,
     };
     if (snapshot?.id) {
       const result: any = await run(editingTransactionKey ? "거래 수정 스냅샷 생성" : "거래 추가 스냅샷 생성", () => request(
@@ -405,6 +411,12 @@ function App() {
     resetTransactionDraft(next);
   }
 
+  useEffect(() => {
+    if (accountFilter === "dues_intake" && activeTab === "public") {
+      setActiveTab("ledger");
+    }
+  }, [accountFilter, activeTab]);
+
   async function uploadWorkbook(file: File, kind: "ledger" | "bank") {
     const result = await run(kind === "ledger" ? "Aegis 장부 분석" : "토스 거래내역 분석", async () => {
       const form = new FormData();
@@ -435,7 +447,6 @@ function App() {
         const form = new FormData();
         form.append("file", file);
         form.append("kind", evidenceKind);
-        form.append("account_id", evidenceAccountId);
         if (evidenceTransactionNumber) form.append("transaction_number", evidenceTransactionNumber);
         uploaded.push(await uploadForm("/evidence/upload", form));
       }
@@ -476,10 +487,10 @@ function App() {
 
   async function importGoogleSheet() {
     if (!googleSheetSource.trim()) {
-      setError("Google 회계장부 URL 또는 ID를 입력해주세요.");
+      setError("운영계좌 Google 장부 URL 또는 ID를 입력해주세요.");
       return;
     }
-    const result: any = await run("Google 장부 스냅샷 생성", () => request("/google/sheets/snapshot", {
+    const result: any = await run("운영계좌 Google 장부 스냅샷 생성", () => request("/google/sheets/snapshot", {
       method: "POST",
       body: JSON.stringify({
         spreadsheet_url_or_id: googleSheetSource.trim(),
@@ -490,6 +501,34 @@ function App() {
         opening_balance: Number(openingBalance || 0),
         organization_id: "aegis",
         account_id: "primary",
+      }),
+    }));
+    if (!result) return;
+    setSnapshot(result);
+    setTransactionsText(JSON.stringify(result.transactions || [], null, 2));
+    setEvidenceText(JSON.stringify(result.evidence || [], null, 2));
+    const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
+    const last = sortedTransactions[sortedTransactions.length - 1];
+    if (last?.balance !== undefined) setExpectedClosingBalance(Number(last.balance));
+    resetTransactionDraft(result.transactions || []);
+  }
+
+  async function importGoogleDuesSheet() {
+    if (!duesSheetSource.trim()) {
+      setError("회비입금계좌 Google 장부 URL 또는 ID를 입력해주세요.");
+      return;
+    }
+    const result: any = await run("회비입금계좌 Google 장부 스냅샷 생성", () => request("/google/sheets/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        spreadsheet_url_or_id: duesSheetSource.trim(),
+        range: googleSheetRange.trim() || "B:I",
+        period: semester,
+        period_start: periodStart || null,
+        period_end: periodEnd || null,
+        opening_balance: Number(openingBalance || 0),
+        organization_id: "aegis",
+        account_id: "dues_intake",
       }),
     }));
     if (!result) return;
@@ -514,7 +553,8 @@ function App() {
     setEvidenceText(JSON.stringify(result.evidence, null, 2));
   }
 
-  const snapshotPayload = { organization_id: "aegis", account_id: "primary", period: semester, period_start: periodStart, period_end: periodEnd, transactions, evidence };
+  const activeAccountId = accountFilter === "dues_intake" ? "dues_intake" : "primary";
+  const snapshotPayload = { organization_id: "aegis", account_id: activeAccountId, period: semester, period_start: periodStart, period_end: periodEnd, transactions, evidence };
 
   async function downloadPackage() {
     if (!packageData?.id || !authToken) return;
@@ -553,10 +593,10 @@ function App() {
     });
   }
 
-  const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
+  const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode; hideForDues?: boolean }> = [
     { id: "ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
     { id: "package", label: "동연 패키지", icon: <FileArchive size={17} /> },
-    { id: "public", label: "월간 공개", icon: <Link2 size={17} /> },
+    { id: "public", label: "월간 공개", icon: <Link2 size={17} />, hideForDues: true },
     { id: "discord", label: "Discord", icon: <Send size={17} /> },
     { id: "history", label: "감사 로그", icon: <History size={17} /> },
   ];
@@ -581,7 +621,7 @@ function App() {
         </section>
       ) : (
         <>
-          <nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>{tab.icon}{tab.label}</button>)}</nav>
+          <nav className="tabs" aria-label="ATLAS 메뉴">{tabs.filter((tab) => !tab.hideForDues || accountFilter !== "dues_intake").map((tab) => <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>{tab.icon}{tab.label}</button>)}</nav>
 
           <section className="metric-grid">
             <Metric label="수입총액" value={money(totalIncome)} /><Metric label="지출총액" value={money(totalExpense)} /><Metric label="계산잔액" value={money(computedClosing)} /><Metric label="기대잔액" value={money(expectedClosingBalance)} />
@@ -595,12 +635,14 @@ function App() {
                 <div className="panel-heading"><h3>Google 자료 연결</h3>{googleConnection && <StatusBadge value={googleConnection.connected ? "CONNECTED" : "DISCONNECTED"} />}</div>
                 <p className="muted">{googleConnection?.connected ? `${googleConnection.account_email} · 읽기 전용 연결` : "운영 계정의 Sheets 장부와 Drive 증빙을 읽기 전용으로 연결합니다."}</p>
                 <div className="form-grid single google-import-form">
-                  <label>회계장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
+                  <label>운영계좌 장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
+                  <label>회비입금계좌 장부 URL 또는 ID<input value={duesSheetSource} onChange={(event) => setDuesSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
                   <label>가져올 범위<input value={googleSheetRange} onChange={(event) => setGoogleSheetRange(event.target.value)} placeholder="B:I 또는 시트명!B:I" /></label>
                 </div>
                 <div className="button-row">
                   {googleConnection?.connected ? <button className="secondary danger" onClick={disconnectGoogle}>연결 해제</button> : <button onClick={beginGoogleConnect}>Google 계정 연결</button>}
-                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleSheet}><FileSpreadsheet size={17} /> Google 장부 가져오기</button>
+                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleSheet}><FileSpreadsheet size={17} /> 운영계좌 장부 가져오기</button>
+                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleDuesSheet}><FileSpreadsheet size={17} /> 회비계좌 장부 가져오기</button>
                   <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Google 진단", () => request("/google/diagnostics"))}>Google 진단</button>
                   <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Sheets 조회", () => request("/google/sheets"))}>Google Sheets</button>
                   <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Drive 조회", () => request("/google/drive/files"))}>Google Drive</button>
@@ -612,7 +654,7 @@ function App() {
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
                 <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 거래내역</span><small>{bankUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
-                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><select aria-label="증빙 계좌" value={evidenceAccountId} onChange={(event) => setEvidenceAccountId(event.target.value)}><option value="primary">운영 main 계좌</option><option value="dues_intake">회비입금전용 계좌</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="#ID# 또는 *ID* 없을 때 입력" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#ID# 운영계좌 · *ID* 회비계좌 자동 매칭"}</small></div>
+                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="수동 번호 (파일명 없을 때)" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#장부ID# → 운영계좌 · *장부ID* → 회비계좌 자동 매칭"}</small></div>
               </div>
               {snapshot?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.reconciliation.balance_delta)}</strong><span>장부 {snapshot.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.reconciliation.matched_ledger_count}건</span></div>}
               <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>
@@ -635,10 +677,17 @@ function App() {
                 <div className="button-row"><button onClick={saveTransactionDraft} disabled={!!busy}><Save size={17} /> {editingTransactionKey ? "수정 저장" : "거래 추가"}</button><button className="secondary" onClick={() => resetTransactionDraft()} disabled={!!busy}>초기화</button></div>
               </div>
               <div className="table-wrap ledger-table-wrap">
-                <h3>거래 목록</h3>
+                <div className="table-header-row">
+                  <h3>거래 목록</h3>
+                  <select aria-label="계좌 필터" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as "primary" | "dues_intake" | "all")}>
+                    <option value="all">전체 계좌</option>
+                    <option value="primary">운영계좌 (토스뱅크)</option>
+                    <option value="dues_intake">회비입금계좌 (기업은행)</option>
+                  </select>
+                </div>
                 <table>
-                  <thead><tr><th>번호</th><th>날짜</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>처리방식</th><th>상세정보</th><th>증빙</th><th></th></tr></thead>
-                  <tbody>{transactions.map((row) => <tr key={row.transaction_id || row.number}><td>{row.number}</td><td>{row.date}</td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
+                  <thead><tr><th>번호</th><th>날짜</th><th>계좌</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>처리방식</th><th>상세정보</th><th>증빙</th><th></th></tr></thead>
+                  <tbody>{transactions.filter((row) => accountFilter === "all" || (row.account_id || "primary") === accountFilter).map((row) => <tr key={row.transaction_id || row.number}><td>{row.number}</td><td>{row.date}</td><td><span className={`account-tag ${(row.account_id || "primary") === "dues_intake" ? "dues" : "primary"}`}>{(row.account_id || "primary") === "dues_intake" ? "회비" : "운영"}</span></td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
                 </table>
               </div>
             </section>
