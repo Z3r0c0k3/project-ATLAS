@@ -9,7 +9,9 @@ from .naming import normalize_filename
 from .integrity import canonical_sha256
 
 
-VALIDATION_RULE_VERSION = "atlas-ledger-v1.2"
+VALIDATION_RULE_VERSION = "atlas-ledger-v1.3"
+CARD_EVIDENCE_METHODS = frozenset({"카드결제", "카드결제취소"})
+REQUIRED_EVIDENCE_KINDS = frozenset({"receipt", "explanation"})
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,11 @@ class LedgerSummary:
     reported_closing_balance: int | None
     transaction_count: int
     evidence_count: int
+
+
+def processing_method_requires_evidence(value: str | None) -> bool:
+    normalized = "".join(str(value or "").split())
+    return normalized in CARD_EVIDENCE_METHODS
 
 
 def _transaction_identity(row: dict) -> tuple[str, str]:
@@ -272,19 +279,30 @@ def validate_ledger(
 
         linked_ids = set(tx.evidence_ids)
         linked_ids.update(item.id for item in evidence if tx.transaction_id in item.transaction_ids or item.transaction_number == tx.number)
-        if tx.expense and not linked_ids:
-            issues.append(ValidationIssue("MISSING_EXPENSE_EVIDENCE", "ERROR", "ERROR", "지출 거래에 영수증 또는 소명자료가 연결되지 않았습니다.", **issue_context))
+        matching_required_evidence: list[Evidence] = []
         for evidence_id in linked_ids:
             item = evidence_by_id.get(evidence_id)
             if not item:
                 issues.append(ValidationIssue("UNKNOWN_EVIDENCE", "ERROR", "ERROR", f"연결된 증빙자료 {evidence_id}를 찾을 수 없습니다.", **issue_context))
                 continue
+            if item.kind.lower() in REQUIRED_EVIDENCE_KINDS and item.accessible:
+                matching_required_evidence.append(item)
             if not item.accessible:
                 issues.append(ValidationIssue("EVIDENCE_INACCESSIBLE", "ERROR", "ERROR", f"증빙자료 {item.filename}에 접근할 수 없습니다.", **issue_context))
             if item.amount is not None and tx.expense and item.amount != tx.expense:
                 issues.append(ValidationIssue("EVIDENCE_AMOUNT_MISMATCH", "WARNING", "WARNING", f"증빙 금액 {item.amount:,}원이 거래 금액 {tx.expense:,}원과 다릅니다.", **issue_context))
             if item.evidence_date and tx_date and _parse_date(item.evidence_date) != tx_date:
                 issues.append(ValidationIssue("EVIDENCE_DATE_MISMATCH", "WARNING", "WARNING", f"증빙 날짜 {item.evidence_date}가 거래 날짜 {tx.date}와 다릅니다.", **issue_context))
+        if processing_method_requires_evidence(tx.processing_method) and not matching_required_evidence:
+            issues.append(
+                ValidationIssue(
+                    "MISSING_CARD_EVIDENCE",
+                    "ERROR",
+                    "ERROR",
+                    f"장부 {tx.number}번 {tx.processing_method.strip()} 거래에 매칭되는 소명자료 또는 영수증이 존재하지 않습니다.",
+                    **issue_context,
+                )
+            )
 
     for evidence_id, transaction_ids in links.items():
         if len(transaction_ids) > 1:

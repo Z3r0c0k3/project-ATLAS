@@ -20,6 +20,7 @@ from .accounting import (
     VALIDATION_RULE_VERSION,
     Evidence,
     Transaction,
+    processing_method_requires_evidence,
     public_monthly_summary,
     validate_ledger,
 )
@@ -240,7 +241,7 @@ def _populate_evidence_slot(table, slot_index: int, entry: dict, treasurer_name:
     number_value = tx.number if tx else (item.transaction_number if item else None)
     description = tx.description if tx else (item.filename if item else "미연결 자료")
     note = tx.note if tx and tx.note else (entry.get("message") or (item.filename if item else ""))
-    amount = tx.expense if tx else (item.amount if item else None)
+    amount = (tx.expense or tx.income) if tx else (item.amount if item else None)
 
     _set_cell_text(table.cell(base, 1), f"날짜 : {date_value or '-'}")
     _set_cell_text(table.cell(base, 3), f"번호(수입지출관리대장) : {number_value or '-'}")
@@ -273,7 +274,7 @@ def generate_evidence_document(
     embedded_files = 0
     embedded_pages = 0
     unsupported_files: list[str] = []
-    missing_expenses: list[int] = []
+    missing_required_cards: list[int] = []
     account_breakdown: dict[str, dict[str, int | str]] = {}
     entries: list[dict] = []
 
@@ -285,11 +286,17 @@ def generate_evidence_document(
         row["files"] = int(row["files"]) + 1
         row["pages"] = int(row["pages"]) + pages
 
-    for tx in expense_rows:
+    for tx in transactions:
         linked = [item for item in _linked_evidence(tx, evidence) if item.kind != "account_capture"]
         if not linked:
-            missing_expenses.append(tx.number)
-            entries.append({"transaction": tx, "message": "연결된 영수증 또는 소명자료가 없습니다."})
+            if processing_method_requires_evidence(tx.processing_method):
+                missing_required_cards.append(tx.number)
+                entries.append(
+                    {
+                        "transaction": tx,
+                        "message": f"장부 {tx.number}번 {tx.processing_method.strip()} 거래에 매칭되는 소명자료 또는 영수증이 존재하지 않습니다.",
+                    }
+                )
             continue
         for item in linked:
             used_evidence.add(item.id)
@@ -331,7 +338,8 @@ def generate_evidence_document(
     shutil.rmtree(render_dir, ignore_errors=True)
     return {
         "expense_count": len(expense_rows),
-        "missing_expense_numbers": missing_expenses,
+        "missing_expense_numbers": [number for number in missing_required_cards if any(tx.number == number and tx.expense for tx in transactions)],
+        "missing_required_card_numbers": missing_required_cards,
         "embedded_files": embedded_files,
         "embedded_pages": embedded_pages,
         "unsupported_files": sorted(set(unsupported_files)),

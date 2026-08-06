@@ -13,7 +13,7 @@ class AccountingValidationTest(unittest.TestCase):
     def test_valid_ledger_passes_balance_and_evidence_checks(self) -> None:
         transactions = [
             Transaction(1, "2026-03-01", "회비", 100_000, 0, 1_100_000),
-            Transaction(2, "2026-03-02", "현수막", 0, 20_000, 1_080_000, evidence_id="ev1"),
+            Transaction(2, "2026-03-02", "현수막", 0, 20_000, 1_080_000, evidence_id="ev1", processing_method="카드결제"),
         ]
         evidence = [Evidence("ev1", 2, "receipt.png", "receipt")]
 
@@ -26,7 +26,7 @@ class AccountingValidationTest(unittest.TestCase):
 
     def test_invalid_ledger_reports_missing_evidence_and_balance_mismatch(self) -> None:
         transactions = [
-            Transaction(1, "2026-03-01", "비품", 0, 30_000, 980_000),
+            Transaction(1, "2026-03-01", "비품", 0, 30_000, 980_000, processing_method="카드결제"),
         ]
 
         result = validate_ledger(1_000_000, transactions, [], 960_000)
@@ -34,8 +34,31 @@ class AccountingValidationTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "ERROR")
         self.assertIn("BALANCE_CONTINUITY", codes)
-        self.assertIn("MISSING_EXPENSE_EVIDENCE", codes)
+        self.assertIn("MISSING_CARD_EVIDENCE", codes)
         self.assertIn("CLOSING_BALANCE_MISMATCH", codes)
+
+    def test_card_payment_and_cancellation_require_receipt_or_explanation(self) -> None:
+        transactions = [
+            Transaction(1, "2026-03-01", "비품 결제", 0, 30_000, 970_000, processing_method="카드결제"),
+            Transaction(2, "2026-03-02", "비품 결제 취소", 30_000, 0, 1_000_000, processing_method="카드결제취소"),
+        ]
+
+        result = validate_ledger(1_000_000, transactions, [], 1_000_000)
+        missing = [issue for issue in result["issues"] if issue["code"] == "MISSING_CARD_EVIDENCE"]
+
+        self.assertEqual(result["status"], "ERROR")
+        self.assertEqual([issue["transaction_number"] for issue in missing], [1, 2])
+        self.assertTrue(all("매칭되는 소명자료 또는 영수증이 존재하지 않습니다" in issue["message"] for issue in missing))
+
+    def test_bank_transfer_evidence_is_optional(self) -> None:
+        transactions = [
+            Transaction(1, "2026-03-01", "대관료", 0, 30_000, 970_000, processing_method="계좌이체"),
+        ]
+
+        result = validate_ledger(1_000_000, transactions, [], 970_000)
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertNotIn("MISSING_CARD_EVIDENCE", {issue["code"] for issue in result["issues"]})
 
     def test_monthly_summary_hides_private_metadata(self) -> None:
         transactions = [
@@ -53,6 +76,32 @@ class AccountingValidationTest(unittest.TestCase):
 
 
 class PackageGenerationTest(unittest.TestCase):
+    def test_submission_report_marks_missing_card_evidence_as_error(self) -> None:
+        transactions = [
+            Transaction(1, "2026-03-01", "행사용 비품", 0, 30_000, 970_000, processing_method="카드결제"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = build_submission_package(
+                Path(tmp),
+                "pkg_missing_card_evidence",
+                "Aegis",
+                "2026년 1학기",
+                "회계",
+                "회장",
+                "검토",
+                1_000_000,
+                970_000,
+                transactions,
+                [],
+                40,
+            )
+            report = (Path(tmp) / "pkg_missing_card_evidence" / "검증_리포트.html").read_text(encoding="utf-8")
+
+        self.assertEqual(result["validation"]["status"], "ERROR")
+        self.assertEqual(result["document_coverage"]["evidence_document"]["missing_required_card_numbers"], [1])
+        self.assertIn("MISSING_CARD_EVIDENCE", report)
+        self.assertIn("장부 1번 카드결제 거래에 매칭되는 소명자료 또는 영수증이 존재하지 않습니다.", report)
+
     def test_official_ledger_template_rejects_more_than_120_rows(self) -> None:
         transactions = [Transaction(index, "2026-03-01", f"거래 {index}", 0, 1, -index) for index in range(1, 122)]
         with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(ValueError, "최대 120칸"):
