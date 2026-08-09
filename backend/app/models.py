@@ -136,11 +136,17 @@ class SubmissionPackageRequest(BaseModel):
     sheet_name: str | None = None
     source_modified_time: str | None = None
     snapshot_id: str | None = None
+    primary_snapshot_id: str | None = None
+    dues_snapshot_id: str | None = None
     treasurer_name: str
     president_name: str
     reviewer_name: str | None = None
     opening_balance: int
     expected_closing_balance: int | None = None
+    primary_opening_balance: int | None = None
+    primary_expected_closing_balance: int | None = None
+    dues_opening_balance: int | None = None
+    dues_expected_closing_balance: int | None = None
     row_capacity: Literal[40, 80, 120] = 40
     transactions: list[TransactionInput] = Field(default_factory=list)
     evidence: list[EvidenceInput] = Field(default_factory=list)
@@ -150,6 +156,7 @@ class PackageJobResponse(BaseModel):
     job_id: str
     package_id: str
     snapshot_id: str
+    snapshot_ids: dict[str, str] = Field(default_factory=dict)
     status: str
     status_url: str
 

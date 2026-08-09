@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import io
 import tempfile
 import time
 import unittest
@@ -324,6 +325,26 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(explicit, (42, "filename_hash_id", "primary"))
         self.assertEqual(dues, (42, "filename_dues_star_id", "dues_intake"))
 
+    def test_manual_account_selection_applies_to_generic_account_capture(self) -> None:
+        uploaded = self.client.post(
+            "/evidence/upload",
+            headers=self.headers,
+            data={"kind": "account_capture", "account_id": "dues_intake"},
+            files={"file": ("계좌 캡처.png", io.BytesIO(b"capture"), "image/png")},
+        )
+        conflict = self.client.post(
+            "/evidence/upload",
+            headers=self.headers,
+            data={"kind": "receipt", "account_id": "dues_intake"},
+            files={"file": ("#1# 영수증.png", io.BytesIO(b"receipt"), "image/png")},
+        )
+
+        self.assertEqual(uploaded.status_code, 200)
+        self.assertEqual(uploaded.json()["account_id"], "dues_intake")
+        self.assertEqual(uploaded.json()["match_method"], "manual_account")
+        self.assertEqual(conflict.status_code, 422)
+        self.assertIn("일치하지 않습니다", conflict.json()["detail"])
+
     def test_transaction_crud_creates_snapshot_revisions(self) -> None:
         snapshot = self.client.post(
             "/ledger-snapshots",
@@ -392,6 +413,50 @@ class ApiWorkflowTest(unittest.TestCase):
             primary_snapshot["transactions"][0]["transaction_id"],
             dues_snapshot["transactions"][0]["transaction_id"],
         )
+
+    def test_combined_package_uses_both_account_snapshots(self) -> None:
+        primary = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={"account_id": "primary", "period": "2026", "transactions": [{"number": 1, "date": "2026-01-01", "description": "Primary income", "income": 10_000, "expense": 0, "balance": 10_000}]},
+        ).json()
+        dues = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={"account_id": "dues_intake", "period": "2026", "transactions": [{"number": 1, "date": "2026-01-02", "description": "Dues income", "income": 20_000, "expense": 0, "balance": 20_000}]},
+        ).json()
+
+        response = self.client.post(
+            "/packages/submission",
+            headers=self.headers,
+            json={
+                "club_name": "Aegis",
+                "semester": "2026년 1학기",
+                "treasurer_name": "회계",
+                "president_name": "회장",
+                "reviewer_name": "검토",
+                "opening_balance": 0,
+                "primary_opening_balance": 0,
+                "primary_expected_closing_balance": 10_000,
+                "dues_opening_balance": 0,
+                "dues_expected_closing_balance": 20_000,
+                "primary_snapshot_id": primary["id"],
+                "dues_snapshot_id": dues["id"],
+            },
+        )
+        self.assertEqual(response.status_code, 202)
+        created = response.json()
+        self.assertEqual(created["snapshot_ids"], {"primary": primary["id"], "dues_intake": dues["id"]})
+        for _ in range(150):
+            job = self.client.get(f"/jobs/{created['job_id']}", headers=self.headers).json()
+            if job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.02)
+        self.assertEqual(job["status"], "completed", job.get("error"))
+        package = self.client.get(f"/packages/{created['package_id']}", headers=self.headers).json()
+        self.assertEqual(package["validation"]["status"], "PASS")
+        self.assertEqual(package["document_coverage"]["ledger"]["accounts"]["primary"]["transaction_rows"], 1)
+        self.assertEqual(package["document_coverage"]["ledger"]["accounts"]["dues_intake"]["transaction_rows"], 1)
 
     def test_snapshot_rejects_evidence_from_another_account(self) -> None:
         response = self.client.post(

@@ -5,8 +5,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from docx import Document
+from openpyxl import load_workbook
+from PIL import Image
+
 from app.services.accounting import CARD_EVIDENCE_METHODS, Evidence, Transaction, public_monthly_summary, validate_ledger
-from app.services.documents import build_submission_package
+from app.services.documents import build_combined_submission_package, build_submission_package
 
 
 class AccountingValidationTest(unittest.TestCase):
@@ -95,6 +99,80 @@ class AccountingValidationTest(unittest.TestCase):
 
 
 class PackageGenerationTest(unittest.TestCase):
+    def test_combined_package_separates_same_number_transactions_by_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary_receipt = root / "#1# primary receipt.png"
+            dues_receipt = root / "*1* dues receipt.png"
+            primary_history = root / "토스뱅크 거래내역.png"
+            dues_history = root / "기업은행 거래내역.png"
+            for path in (primary_receipt, dues_receipt, primary_history, dues_history):
+                Image.new("RGB", (640, 420), "white").save(path)
+
+            accounts = {
+                "primary": {
+                    "snapshot_id": "snap-primary",
+                    "ledger_data_hash": "a" * 64,
+                    "opening_balance": 100_000,
+                    "expected_closing_balance": 90_000,
+                    "period_start": "2026-01-01",
+                    "period_end": "2026-06-30",
+                    "transactions": [Transaction(1, "2026-03-01", "운영계좌 카드결제", 0, 10_000, 90_000, processing_method="카드결제", account_id="primary")],
+                    "evidence": [
+                        Evidence("primary-receipt", 1, primary_receipt.name, "receipt", account_id="primary", local_path=str(primary_receipt)),
+                        Evidence("primary-history", None, primary_history.name, "account_capture", account_id="primary", local_path=str(primary_history)),
+                    ],
+                    "bank_transactions": [{"occurred_at": "2026-03-01T12:00:00", "description": "Primary bank row", "amount": -10_000, "balance": 90_000, "transaction_type": "카드"}],
+                },
+                "dues_intake": {
+                    "snapshot_id": "snap-dues",
+                    "ledger_data_hash": "b" * 64,
+                    "opening_balance": 200_000,
+                    "expected_closing_balance": 195_000,
+                    "period_start": "2026-01-01",
+                    "period_end": "2026-06-30",
+                    "transactions": [Transaction(1, "2026-03-02", "회비계좌 카드결제", 0, 5_000, 195_000, processing_method="카드결제", account_id="dues_intake")],
+                    "evidence": [
+                        Evidence("dues-receipt", 1, dues_receipt.name, "receipt", account_id="dues_intake", local_path=str(dues_receipt)),
+                        Evidence("dues-history", None, dues_history.name, "account_capture", account_id="dues_intake", local_path=str(dues_history)),
+                    ],
+                    "bank_transactions": [{"occurred_at": "2026-03-02T12:00:00", "description": "Dues bank row", "amount": -5_000, "balance": 195_000, "transaction_type": "이체"}],
+                },
+            }
+
+            result = build_combined_submission_package(
+                root,
+                "pkg-combined",
+                "Aegis",
+                "2026년 1학기",
+                "회계",
+                "회장",
+                "검토",
+                accounts,
+                40,
+            )
+            package_dir = root / "pkg-combined"
+            workbook = load_workbook(package_dir / "동아리 수입지출관리대장.xlsx", data_only=False)
+            primary_document = Document(package_dir / "영수증 및 소명자료 - 동아리운영계좌.docx")
+            dues_document = Document(package_dir / "영수증 및 소명자료 - 회비입금계좌.docx")
+            account_document = Document(package_dir / "동아리 계좌 전체내역.docx")
+            with zipfile.ZipFile(result["zip_path"]) as archive:
+                names = set(archive.namelist())
+
+        self.assertEqual(workbook.sheetnames, ["운영계좌", "회비입금계좌"])
+        self.assertEqual(workbook["운영계좌"]["G10"].value, "운영계좌 카드결제")
+        self.assertEqual(workbook["회비입금계좌"]["G10"].value, "회비계좌 카드결제")
+        self.assertIn("운영계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
+        self.assertNotIn("회비계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
+        self.assertIn("회비계좌 카드결제", "\n".join(cell.text for table in dues_document.tables for row in table.rows for cell in row.cells))
+        self.assertGreaterEqual(len(account_document.inline_shapes), 4)
+        self.assertEqual(result["document_coverage"]["account_document"]["generated_bank_pages"], 2)
+        self.assertEqual(result["validation"]["status"], "PASS")
+        self.assertIn("동아리 계좌 전체내역.docx", names)
+        self.assertIn("동아리 수입지출관리대장.xlsx", names)
+        self.assertIn("영수증 및 소명자료 - 동아리운영계좌.docx", names)
+        self.assertIn("영수증 및 소명자료 - 회비입금계좌.docx", names)
+
     def test_submission_report_marks_missing_card_evidence_as_error(self) -> None:
         transactions = [
             Transaction(1, "2026-03-01", "행사용 비품", 0, 30_000, 970_000, processing_method=min(CARD_EVIDENCE_METHODS, key=len)),

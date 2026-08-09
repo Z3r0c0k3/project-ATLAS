@@ -140,7 +140,7 @@ function StatusBadge({ value }: { value: string }) {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("ledger");
+  const [activeTab, setActiveTab] = useState<Tab>("package");
   const [username, setUsername] = useState(() => window.sessionStorage.getItem("atlas_username") || "aegis-admin");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState(() => window.sessionStorage.getItem("atlas_role") || "admin");
@@ -260,6 +260,11 @@ function App() {
   const totalExpense = activeTransactions.reduce((sum, row) => sum + Number(row.expense || 0), 0);
   const computedClosing = openingBalance + totalIncome - totalExpense;
   const selectedTransactionLabel = editingTransactionKey ? `수정 중: ${editingTransactionKey}` : "새 거래";
+  const primaryCaptureCount = primaryEvidence.filter((item) => item.kind === "account_capture").length;
+  const duesCaptureCount = duesEvidence.filter((item) => item.kind === "account_capture").length;
+  const primaryHistoryCount = primaryCaptureCount || Number(Boolean(primarySnapshot?.source?.bank_transactions?.length));
+  const duesHistoryCount = duesCaptureCount || Number(Boolean(duesSnapshot?.source?.bank_transactions?.length));
+  const packageReady = Boolean(primarySnapshot?.id && duesSnapshot?.id && primaryHistoryCount && duesHistoryCount);
 
   function setPeriodStart(value: string) {
     if (activeAccountId === "dues_intake") setDuesPeriodStart(value);
@@ -514,36 +519,87 @@ function App() {
     if (result) setGoogleConnection(result);
   }
 
-  async function uploadEvidenceFiles(files: FileList) {
+  function storeEvidenceUploads(result: any[]) {
+    const primaryAdded = result.filter((item: any) => item.account_id !== "dues_intake");
+    const duesAdded = result.filter((item: any) => item.account_id === "dues_intake");
+    if (primaryAdded.length) {
+      setPrimaryEvidenceUploads((current) => [...current, ...primaryAdded]);
+      setPrimaryEvidence((current) => [
+        ...current.filter((item) => !primaryAdded.some((added: any) => added.id === item.id)),
+        ...primaryAdded,
+      ]);
+    }
+    if (duesAdded.length) {
+      setDuesEvidenceUploads((current) => [...current, ...duesAdded]);
+      setDuesEvidence((current) => [
+        ...current.filter((item) => !duesAdded.some((added: any) => added.id === item.id)),
+        ...duesAdded,
+      ]);
+    }
+  }
+
+  async function uploadEvidenceFiles(
+    files: FileList,
+    kindOverride?: string,
+    accountOverride: AccountId | undefined = kindOverride ? undefined : ledgerAccountId,
+  ): Promise<any[]> {
     const result = await run("증빙자료 업로드", async () => {
       const uploaded: any[] = [];
       for (const file of Array.from(files)) {
         const form = new FormData();
         form.append("file", file);
-        form.append("kind", evidenceKind);
+        form.append("kind", kindOverride || evidenceKind);
+        if (accountOverride) form.append("account_id", accountOverride);
         if (evidenceTransactionNumber) form.append("transaction_number", evidenceTransactionNumber);
         uploaded.push(await uploadForm("/evidence/upload", form));
       }
       return uploaded;
     });
     if (result) {
-      const primaryAdded = result.filter((item: any) => item.account_id !== "dues_intake");
-      const duesAdded = result.filter((item: any) => item.account_id === "dues_intake");
-      if (primaryAdded.length) {
-        setPrimaryEvidenceUploads((current) => [...current, ...primaryAdded]);
-        setPrimaryEvidence((current) => [
-          ...current.filter((item) => !primaryAdded.some((added: any) => added.id === item.id)),
-          ...primaryAdded,
-        ]);
-      }
-      if (duesAdded.length) {
-        setDuesEvidenceUploads((current) => [...current, ...duesAdded]);
-        setDuesEvidence((current) => [
-          ...current.filter((item) => !duesAdded.some((added: any) => added.id === item.id)),
-          ...duesAdded,
-        ]);
+      storeEvidenceUploads(result);
+      const targetSnapshot = accountOverride === "dues_intake" ? duesSnapshot : primarySnapshot;
+      if (accountOverride && targetSnapshot?.id && result.length) {
+        const revision: any = await run("선택 계좌에 증빙 자동 반영", () => request(`/ledger-snapshots/${targetSnapshot.id}/evidence`, {
+          method: "POST",
+          body: JSON.stringify({ evidence_ids: result.map((item: any) => item.id) }),
+        }));
+        if (revision) {
+          setAccountSnapshot(accountOverride, revision);
+          setAccountTransactions(accountOverride, revision.transactions || []);
+          setAccountEvidence(accountOverride, revision.evidence || []);
+        }
       }
     }
+    return result || [];
+  }
+
+  async function attachEvidenceToBothSnapshots(rows?: any[]) {
+    const candidates = rows || [...primaryEvidenceUploads, ...duesEvidenceUploads];
+    const targets = [
+      { accountId: "primary" as AccountId, snapshot: primarySnapshot, ids: candidates.filter((item) => item.account_id !== "dues_intake").map((item) => item.id) },
+      { accountId: "dues_intake" as AccountId, snapshot: duesSnapshot, ids: candidates.filter((item) => item.account_id === "dues_intake").map((item) => item.id) },
+    ].filter((target) => target.snapshot?.id && target.ids.length);
+    if (!targets.length) return;
+    const result = await run("두 계좌 증빙 반영", async () => {
+      const revisions: any[] = [];
+      for (const target of targets) {
+        revisions.push(await request(`/ledger-snapshots/${target.snapshot.id}/evidence`, {
+          method: "POST",
+          body: JSON.stringify({ evidence_ids: target.ids }),
+        }));
+      }
+      return revisions;
+    });
+    for (const revision of result || []) {
+      setAccountSnapshot(revision.account_id, revision);
+      setAccountTransactions(revision.account_id, revision.transactions || []);
+      setAccountEvidence(revision.account_id, revision.evidence || []);
+    }
+  }
+
+  async function uploadPackageEvidence(files: FileList) {
+    const uploaded = await uploadEvidenceFiles(files, "auto");
+    if (uploaded.length && primarySnapshot?.id && duesSnapshot?.id) await attachEvidenceToBothSnapshots(uploaded);
   }
 
   async function importWorkbooks() {
@@ -668,19 +724,29 @@ function App() {
   }
 
   async function createPackageJob() {
+    if (!packageReady) {
+      setError("두 계좌 장부와 계좌 전체내역 자료를 모두 준비해주세요.");
+      return;
+    }
     await run("패키지 생성", async () => {
       const created: any = await request("/packages/submission", {
         method: "POST",
         body: JSON.stringify({
-          ...snapshotPayload,
           club_name: clubName,
+          organization_id: "aegis",
+          account_id: "primary",
           semester,
-snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnapshot?.id,
+          primary_snapshot_id: primarySnapshot.id,
+          dues_snapshot_id: duesSnapshot.id,
           treasurer_name: treasurerName,
           president_name: presidentName,
           reviewer_name: reviewerName,
-          opening_balance: openingBalance,
-          expected_closing_balance: expectedClosingBalance,
+          opening_balance: primaryOpeningBalance,
+          expected_closing_balance: primaryExpectedClosingBalance,
+          primary_opening_balance: primaryOpeningBalance,
+          primary_expected_closing_balance: primaryExpectedClosingBalance,
+          dues_opening_balance: duesOpeningBalance,
+          dues_expected_closing_balance: duesExpectedClosingBalance,
           row_capacity: 40,
         }),
       });
@@ -693,8 +759,8 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
   }
 
   const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode; hideForDues?: boolean }> = [
-    { id: "ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
     { id: "package", label: "동연 패키지", icon: <FileArchive size={17} /> },
+    { id: "ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
     { id: "public", label: "월간 공개", icon: <Link2 size={17} />, hideForDues: true },
     { id: "discord", label: "Discord", icon: <Send size={17} /> },
     { id: "history", label: "감사 로그", icon: <History size={17} /> },
@@ -723,7 +789,14 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
           <nav className="tabs" aria-label="ATLAS 메뉴">{tabs.filter((tab) => !tab.hideForDues || ledgerAccountId !== "dues_intake").map((tab) => <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>{tab.icon}{tab.label}</button>)}</nav>
 
           <section className="metric-grid">
-            <Metric label="수입총액" value={money(totalIncome)} /><Metric label="지출총액" value={money(totalExpense)} /><Metric label="계산잔액" value={money(computedClosing)} /><Metric label="기대잔액" value={money(expectedClosingBalance)} />
+            {activeTab === "package" ? <>
+              <Metric label="운영계좌 거래" value={`${primaryTransactions.length}건`} />
+              <Metric label="회비계좌 거래" value={`${duesTransactions.length}건`} />
+              <Metric label="연결된 증빙" value={`${primaryEvidence.length + duesEvidence.length}개`} />
+              <Metric label="계좌 전체내역" value={`${Number(primaryHistoryCount > 0) + Number(duesHistoryCount > 0)}/2 계좌`} />
+            </> : <>
+              <Metric label="수입총액" value={money(totalIncome)} /><Metric label="지출총액" value={money(totalExpense)} /><Metric label="계산잔액" value={money(computedClosing)} /><Metric label="기대잔액" value={money(expectedClosingBalance)} />
+            </>}
           </section>
 
           {activeTab === "ledger" && <>
@@ -748,7 +821,9 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
                 </div>
               </div>
             </section>
-            <section className="import-surface">
+            <details className="advanced-editor import-details">
+              <summary>파일 기반 장부 가져오기 (보조)</summary>
+              <section className="import-surface">
               <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => { const accountId = event.target.value as AccountId; setLedgerAccountId(accountId); resetTransactionDraft(accountId === "dues_intake" ? duesTransactions : primaryTransactions, accountId); }}><option value="primary">운영계좌 (토스뱅크)</option><option value="dues_intake">회비입금계좌 (기업은행)</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
@@ -757,7 +832,8 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
               </div>
               {snapshot?.source?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.source.reconciliation.balance_delta)}</strong><span>장부 {snapshot.source.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.source.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.source.reconciliation.matched_ledger_count}건</span></div>}
               <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>
-            </section>
+              </section>
+            </details>
             <section className="ledger-crud">
               <div className="panel transaction-form-panel">
                 <div className="panel-heading"><h3>장부 거래 편집</h3><StatusBadge value={selectedTransactionLabel} /></div>
@@ -794,9 +870,37 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
           </>}
 
           {activeTab === "package" && <>
-            <section className="section-head"><div><p className="eyebrow">SUBMISSION PACKAGE</p><h2>동아리연합회 제출본</h2><p>생성, 검토 요청, 승인 이력을 버전 단위로 보존합니다.</p></div>{packageData && <StatusBadge value={packageData.status} />}</section>
-            <section className="workspace-grid"><div className="panel"><h3>서명 정보</h3><div className="form-grid"><label>회계담당자<input value={treasurerName} onChange={(e) => setTreasurerName(e.target.value)} /></label><label>회장<input value={presidentName} onChange={(e) => setPresidentName(e.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(e) => setReviewerName(e.target.value)} /></label></div></div><div className="panel"><h3>현재 작업</h3>{job ? <div className="job-state"><RefreshCw className={job.status === "running" ? "spin" : ""} size={20} /><div><strong>{job.status}</strong><span>{jobIdOf(job)}</span></div></div> : <p className="muted">생성 요청 전입니다.</p>}{packageData?.validation && <div className="validation-line"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div>}{packageData?.document_coverage && <div className="coverage-grid"><span>장부 <strong>{packageData.document_coverage.ledger_transaction_rows}건 / {packageData.document_coverage.ledger_row_capacity}칸</strong></span><span>증빙 삽입 <strong>{packageData.document_coverage.evidence_document.embedded_files}개</strong></span><span>계좌 캡처 <strong>{packageData.document_coverage.account_document.embedded_capture_pages}쪽</strong></span><span>은행 거래 <strong>{packageData.document_coverage.account_document.bank_transaction_rows}건</strong></span></div>}</div></section>
-            <div className="action-bar"><button disabled={!!busy} onClick={createPackageJob}><FileArchive size={17} /> 패키지 생성</button><button className="secondary" disabled={!jobIdOf(job) || !!busy} onClick={refreshCurrentJob}><RefreshCw size={17} /> 상태 확인</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button></div>
+            <section className="section-head"><div><p className="eyebrow">SUBMISSION PACKAGE</p><h2>동아리연합회 제출 패키지</h2><p>두 계좌 장부와 증빙을 하나의 제출본으로 조립합니다.</p></div>{packageData ? <StatusBadge value={packageData.status} /> : <StatusBadge value={packageReady ? "READY" : "PREPARING"} />}</section>
+
+            <section className="package-readiness" aria-label="계좌별 준비 상태">
+              <article className={primarySnapshot?.id && primaryHistoryCount ? "ready" : ""}>
+                <div className="readiness-heading"><div><span className="account-tag primary">운영</span><h3>동아리운영계좌</h3></div><StatusBadge value={primarySnapshot?.id && primaryHistoryCount ? "READY" : "REQUIRED"} /></div>
+                <dl><div><dt>장부</dt><dd>{primarySnapshot?.id ? `${primaryTransactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{primaryEvidence.filter((item) => item.kind !== "account_capture").length}개</dd></div><div><dt>계좌 전체내역</dt><dd>{primaryHistoryCount ? `${primaryHistoryCount}개` : "필요"}</dd></div></dl>
+              </article>
+              <article className={duesSnapshot?.id && duesHistoryCount ? "ready" : ""}>
+                <div className="readiness-heading"><div><span className="account-tag dues">회비</span><h3>회비입금계좌</h3></div><StatusBadge value={duesSnapshot?.id && duesHistoryCount ? "READY" : "REQUIRED"} /></div>
+                <dl><div><dt>장부</dt><dd>{duesSnapshot?.id ? `${duesTransactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{duesEvidence.filter((item) => item.kind !== "account_capture").length}개</dd></div><div><dt>계좌 전체내역</dt><dd>{duesHistoryCount ? `${duesHistoryCount}개` : "필요"}</dd></div></dl>
+              </article>
+            </section>
+
+            <section className="package-upload-band">
+              <div><ReceiptText size={22} /><div><h3>영수증·소명·계좌 전체내역 일괄 등록</h3><p><strong>#장부ID#</strong>는 운영계좌, <strong>*장부ID*</strong>는 회비계좌로 연결됩니다. 파일명에 토스뱅크·기업은행·거래내역이 있으면 계좌 전체내역으로 분류합니다.</p></div></div>
+              <label className="file-button"><Upload size={17} /> 파일 일괄 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={async (event) => { if (event.target.files?.length) await uploadPackageEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
+              <button className="secondary" disabled={(!primaryEvidenceUploads.length && !duesEvidenceUploads.length) || !primarySnapshot?.id || !duesSnapshot?.id || !!busy} onClick={() => attachEvidenceToBothSnapshots()}><RefreshCw size={17} /> 대기 자료 다시 반영</button>
+            </section>
+
+            <section className="deliverables-panel">
+              <div className="deliverables-heading"><div><p className="eyebrow">PACKAGE CONTENTS</p><h3>생성되는 제출 파일</h3></div><strong>필수 문서 4개</strong></div>
+              <div className="deliverable-list">
+                <div><FileSpreadsheet size={20} /><span><strong>동아리 수입지출관리대장.xlsx</strong><small>공식 원본 양식 · 운영계좌/회비입금계좌 2개 시트</small></span><b>1개</b></div>
+                <div><Landmark size={20} /><span><strong>동아리 계좌 전체내역.docx</strong><small>토스뱅크와 기업은행 전체내역 일괄 포함</small></span><b>1개</b></div>
+                <div><ReceiptText size={20} /><span><strong>영수증 및 소명자료</strong><small>운영계좌 1개 · 회비입금계좌 1개로 완전 분리</small></span><b>2개</b></div>
+                <div><Archive size={20} /><span><strong>원본자료·검증 리포트·manifest</strong><small>계좌별 원본 폴더와 무결성 정보 포함</small></span><b>포함</b></div>
+              </div>
+            </section>
+
+            <section className="workspace-grid package-controls"><div className="panel"><h3>제출 정보</h3><div className="form-grid"><label>동아리명<input value={clubName} onChange={(e) => setClubName(e.target.value)} /></label><label>회계 기간<input value={semester} onChange={(e) => setSemester(e.target.value)} /></label><label>회계담당자<input value={treasurerName} onChange={(e) => setTreasurerName(e.target.value)} /></label><label>회장<input value={presidentName} onChange={(e) => setPresidentName(e.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(e) => setReviewerName(e.target.value)} /></label></div></div><div className="panel"><h3>현재 작업</h3>{job ? <div className="job-state"><RefreshCw className={job.status === "running" ? "spin" : ""} size={20} /><div><strong>{job.status}</strong><span>{jobIdOf(job)}</span></div></div> : <p className="muted">두 계좌 준비가 끝나면 패키지를 생성할 수 있습니다.</p>}{packageData?.validation && <div className="validation-line"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div>}{packageData?.document_coverage && <div className="coverage-grid"><span>운영 장부 <strong>{packageData.document_coverage.ledger?.accounts?.primary?.transaction_rows ?? 0}건</strong></span><span>회비 장부 <strong>{packageData.document_coverage.ledger?.accounts?.dues_intake?.transaction_rows ?? 0}건</strong></span><span>운영 증빙 <strong>{packageData.document_coverage.evidence_documents?.primary?.embedded_files ?? 0}개</strong></span><span>회비 증빙 <strong>{packageData.document_coverage.evidence_documents?.dues_intake?.embedded_files ?? 0}개</strong></span><span>계좌내역 <strong>{packageData.document_coverage.account_document?.embedded_capture_pages ?? 0}쪽</strong></span><span>원본 <strong>{(packageData.document_coverage.copied_evidence_files ?? 0) + (packageData.document_coverage.copied_source_files ?? 0)}개</strong></span></div>}</div></section>
+            <div className="action-bar package-actions"><button disabled={!packageReady || !!busy} onClick={createPackageJob}><FileArchive size={17} /> 통합 패키지 생성</button><button className="secondary" disabled={!jobIdOf(job) || !!busy} onClick={refreshCurrentJob}><RefreshCw size={17} /> 상태 확인</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button><button className="secondary" onClick={() => setActiveTab("ledger")}><BookOpenCheck size={17} /> 장부·증빙 관리</button></div>
             {packageData?.zip_sha256 && <section className="integrity"><ShieldCheck size={20} /><div><strong>ZIP 무결성</strong><code>{packageData.zip_sha256}</code></div></section>}
           </>}
 

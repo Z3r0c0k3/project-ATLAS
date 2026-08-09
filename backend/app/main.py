@@ -41,7 +41,7 @@ from .services.accounting import (
     snapshot_payload,
 )
 from .services.discord import render_monthly_discord_message, send_webhook
-from .services.documents import build_monthly_report_payload, build_submission_package
+from .services.documents import build_combined_submission_package, build_monthly_report_payload, build_submission_package
 from .services.google import (
     GoogleApiError,
     build_authorization_url,
@@ -228,7 +228,25 @@ def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None
     labeled = re.search(r"(?:^|[ _-])(?:no|tx|ledger|장부)[ ._#-]*(\d{1,6})(?:[ ._#-]|$)", stem, re.IGNORECASE)
     if labeled:
         return int(labeled.group(1)), "filename_labeled_id", "primary"
+    lowered = stem.lower().replace(" ", "")
+    if any(marker in lowered for marker in ("기업은행", "회비입금", "ibk")):
+        return None, "filename_account_hint", "dues_intake"
+    if any(marker in lowered for marker in ("토스뱅크", "운영계좌", "toss")):
+        return None, "filename_account_hint", "primary"
     return None, "unmatched", None
+
+
+def evidence_kind_from_filename(filename: str) -> str:
+    lowered = Path(normalize_filename(filename)).stem.lower().replace(" ", "")
+    if any(marker in lowered for marker in ("거래내역", "계좌전체", "계좌캡처", "bankstatement")):
+        return "account_capture"
+    if any(marker in lowered for marker in ("소명", "explanation")):
+        return "explanation"
+    if any(marker in lowered for marker in ("영수증", "receipt")):
+        return "receipt"
+    if re.search(r"(?:#|\*)\s*\d{1,6}\s*(?:#|\*)", lowered):
+        return "receipt"
+    return "other"
 
 
 def create_snapshot_revision(
@@ -729,17 +747,26 @@ def upload_evidence(
     request: Request,
     file: UploadFile = File(...),
     kind: str = Form("other"),
+    account_id: str | None = Form(None),
     transaction_number: int | None = Form(None),
     transaction_ids: str = Form(""),
     amount: int | None = Form(None),
     evidence_date: str | None = Form(None),
     session: dict = Depends(require_roles(Role.admin, Role.accountant)),
 ) -> dict:
-    if kind not in {"receipt", "explanation", "account_capture", "other"}:
+    if kind not in {"auto", "receipt", "explanation", "account_capture", "other"}:
         raise HTTPException(status_code=422, detail="Unsupported evidence kind")
+    if account_id not in {None, "primary", "dues_intake"}:
+        raise HTTPException(status_code=422, detail="Unsupported evidence account")
     target, size = persist_upload(file, "evidence")
+    if kind == "auto":
+        kind = evidence_kind_from_filename(target.name)
     inferred_number, match_method, account_hint = evidence_transaction_number_from_filename(target.name)
-    inferred_account_id = account_hint or "primary"
+    if account_id and account_hint and account_id != account_hint:
+        raise HTTPException(status_code=422, detail="선택한 계좌와 파일명의 계좌 표식이 일치하지 않습니다.")
+    inferred_account_id = account_hint or account_id or "primary"
+    if account_id and not account_hint:
+        match_method = "manual_account"
     if inferred_number is None and transaction_number is not None:
         inferred_number = transaction_number
         match_method = "manual"
@@ -1060,7 +1087,25 @@ def create_submission_package(
     request: Request,
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president)),
 ) -> PackageJobResponse:
-    snapshot = resolve_snapshot_for_package(payload, session)
+    combined = bool(payload.primary_snapshot_id or payload.dues_snapshot_id)
+    if combined and not (payload.primary_snapshot_id and payload.dues_snapshot_id):
+        raise HTTPException(status_code=422, detail="통합 동연 패키지에는 운영계좌와 회비입금계좌 스냅샷이 모두 필요합니다.")
+    if combined:
+        snapshots = {
+            "primary": store.get("ledger_snapshots", payload.primary_snapshot_id),
+            "dues_intake": store.get("ledger_snapshots", payload.dues_snapshot_id),
+        }
+        if not snapshots["primary"] or not snapshots["dues_intake"]:
+            raise HTTPException(status_code=404, detail="패키지에 사용할 장부 스냅샷을 찾을 수 없습니다.")
+        for account_id, item in snapshots.items():
+            if item.get("account_id") != account_id:
+                raise HTTPException(status_code=409, detail=f"{account_id} 스냅샷의 계좌 구분이 일치하지 않습니다.")
+            if item.get("organization_id") != payload.organization_id:
+                raise HTTPException(status_code=409, detail="다른 조직의 장부 스냅샷은 함께 패키징할 수 없습니다.")
+        snapshot = snapshots["primary"]
+    else:
+        snapshot = resolve_snapshot_for_package(payload, session)
+        snapshots = {snapshot["account_id"]: snapshot}
     related = [
         item
         for item in store.read_collection("packages").values()
@@ -1075,6 +1120,8 @@ def create_submission_package(
             "version": len(related) + 1,
             "snapshot_id": snapshot["id"],
             "snapshot_hash": snapshot["data_hash"],
+            "snapshot_ids": {account_id: item["id"] for account_id, item in snapshots.items()},
+            "snapshot_hashes": {account_id: item["data_hash"] for account_id, item in snapshots.items()},
             "status": "generating",
             "created_by": session["username"],
         },
@@ -1083,33 +1130,77 @@ def create_submission_package(
     payload_data = payload.model_dump(mode="json")
 
     def task() -> dict:
-        latest_snapshot = store.get("ledger_snapshots", snapshot["id"])
-        if not latest_snapshot:
+        latest_snapshots = {
+            account_id: store.get("ledger_snapshots", item["id"])
+            for account_id, item in snapshots.items()
+        }
+        if any(item is None for item in latest_snapshots.values()):
             raise RuntimeError("Ledger snapshot disappeared before package generation")
-        transactions = normalize_transactions(latest_snapshot["transactions"])
-        evidence = normalize_evidence(latest_snapshot["evidence"])
-        result = build_submission_package(
-            OUTPUT_ROOT,
-            package["id"],
-            payload_data["club_name"],
-            payload_data["semester"],
-            payload_data["treasurer_name"],
-            payload_data["president_name"],
-            payload_data.get("reviewer_name"),
-            payload_data["opening_balance"],
-            payload_data.get("expected_closing_balance"),
-            transactions,
-            evidence,
-            payload_data["row_capacity"],
-            session["username"],
-            latest_snapshot["id"],
-            latest_snapshot["data_hash"],
-            payload_data.get("period_start"),
-            payload_data.get("period_end"),
-            latest_snapshot.get("source", {}).get("bank_transactions", []),
-            latest_snapshot.get("source", {}).get("reconciliation"),
-            latest_snapshot.get("source", {}).get("source_files", []),
-        )
+        if combined:
+            account_payloads = {
+                "primary": {
+                    "snapshot_id": latest_snapshots["primary"]["id"],
+                    "ledger_data_hash": latest_snapshots["primary"]["data_hash"],
+                    "opening_balance": payload_data.get("primary_opening_balance") or 0,
+                    "expected_closing_balance": payload_data.get("primary_expected_closing_balance"),
+                    "period_start": (latest_snapshots["primary"].get("source") or {}).get("period_start"),
+                    "period_end": (latest_snapshots["primary"].get("source") or {}).get("period_end"),
+                    "transactions": normalize_transactions(latest_snapshots["primary"]["transactions"]),
+                    "evidence": normalize_evidence(latest_snapshots["primary"]["evidence"]),
+                    "bank_transactions": (latest_snapshots["primary"].get("source") or {}).get("bank_transactions", []),
+                    "reconciliation": (latest_snapshots["primary"].get("source") or {}).get("reconciliation"),
+                    "source_files": (latest_snapshots["primary"].get("source") or {}).get("source_files", []),
+                },
+                "dues_intake": {
+                    "snapshot_id": latest_snapshots["dues_intake"]["id"],
+                    "ledger_data_hash": latest_snapshots["dues_intake"]["data_hash"],
+                    "opening_balance": payload_data.get("dues_opening_balance") or 0,
+                    "expected_closing_balance": payload_data.get("dues_expected_closing_balance"),
+                    "period_start": (latest_snapshots["dues_intake"].get("source") or {}).get("period_start"),
+                    "period_end": (latest_snapshots["dues_intake"].get("source") or {}).get("period_end"),
+                    "transactions": normalize_transactions(latest_snapshots["dues_intake"]["transactions"]),
+                    "evidence": normalize_evidence(latest_snapshots["dues_intake"]["evidence"]),
+                    "bank_transactions": (latest_snapshots["dues_intake"].get("source") or {}).get("bank_transactions", []),
+                    "reconciliation": (latest_snapshots["dues_intake"].get("source") or {}).get("reconciliation"),
+                    "source_files": (latest_snapshots["dues_intake"].get("source") or {}).get("source_files", []),
+                },
+            }
+            result = build_combined_submission_package(
+                OUTPUT_ROOT,
+                package["id"],
+                payload_data["club_name"],
+                payload_data["semester"],
+                payload_data["treasurer_name"],
+                payload_data["president_name"],
+                payload_data.get("reviewer_name"),
+                account_payloads,
+                payload_data["row_capacity"],
+                session["username"],
+            )
+        else:
+            latest_snapshot = latest_snapshots[snapshot["account_id"]]
+            result = build_submission_package(
+                OUTPUT_ROOT,
+                package["id"],
+                payload_data["club_name"],
+                payload_data["semester"],
+                payload_data["treasurer_name"],
+                payload_data["president_name"],
+                payload_data.get("reviewer_name"),
+                payload_data["opening_balance"],
+                payload_data.get("expected_closing_balance"),
+                normalize_transactions(latest_snapshot["transactions"]),
+                normalize_evidence(latest_snapshot["evidence"]),
+                payload_data["row_capacity"],
+                session["username"],
+                latest_snapshot["id"],
+                latest_snapshot["data_hash"],
+                payload_data.get("period_start"),
+                payload_data.get("period_end"),
+                latest_snapshot.get("source", {}).get("bank_transactions", []),
+                latest_snapshot.get("source", {}).get("reconciliation"),
+                latest_snapshot.get("source", {}).get("source_files", []),
+            )
         updated = store.update(
             "packages",
             package["id"],
@@ -1130,12 +1221,14 @@ def create_submission_package(
 
     job = jobs.submit("submission_package", session, task)
     store.update("packages", package["id"], {"job_id": job["id"]})
-    store.update("jobs", job["id"], {"package_id": package["id"], "snapshot_id": snapshot["id"]})
-    audit(session, "package.requested", "package", package["id"], after={"job_id": job["id"], "snapshot_id": snapshot["id"]}, request=request)
+    snapshot_ids = {account_id: item["id"] for account_id, item in snapshots.items()}
+    store.update("jobs", job["id"], {"package_id": package["id"], "snapshot_id": snapshot["id"], "snapshot_ids": snapshot_ids})
+    audit(session, "package.requested", "package", package["id"], after={"job_id": job["id"], "snapshot_ids": snapshot_ids}, request=request)
     return PackageJobResponse(
         job_id=job["id"],
         package_id=package["id"],
         snapshot_id=snapshot["id"],
+        snapshot_ids=snapshot_ids,
         status="pending",
         status_url=f"/jobs/{job['id']}",
     )

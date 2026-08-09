@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 from openpyxl import load_workbook
+from PIL import Image, ImageDraw, ImageFont
 
 from .accounting import (
     VALIDATION_RULE_VERSION,
@@ -29,7 +31,7 @@ from .media import image_dimensions, render_media_pages
 from .naming import normalize_filename, normalize_nfc, normalize_relative_path
 
 
-TEMPLATE_VERSION = "atlas-documents-v1.3-official-template-fill"
+TEMPLATE_VERSION = "atlas-documents-v1.4-combined-official-template-fill"
 
 
 def _won(value: int) -> str:
@@ -118,8 +120,8 @@ def _convert_official_ledger_template(template_path: Path, destination: Path) ->
         shutil.copy2(converted, destination)
 
 
-def generate_ledger_workbook(
-    output_path: Path,
+def _populate_ledger_sheet(
+    ws,
     club_name: str,
     semester: str,
     treasurer_name: str,
@@ -127,13 +129,10 @@ def generate_ledger_workbook(
     opening_balance: int,
     transactions: list[Transaction],
     row_capacity: int,
-) -> dict:
-    row_capacity = _effective_row_capacity(row_capacity, len(transactions))
-    template_path = _official_template("ledger", row_capacity)
-    _convert_official_ledger_template(template_path, output_path)
-    wb = load_workbook(output_path)
-    ws = wb.active
-    ws["B2"] = f"{club_name} 수입지출 관리대장"
+    account_label: str | None = None,
+) -> None:
+    title_suffix = f" ({account_label})" if account_label else ""
+    ws["B2"] = f"{club_name} 수입지출 관리대장{title_suffix}"
     ws["R3"] = f"{treasurer_name}  (인)"
     ws["V3"] = f"{president_name}  (인)"
     semester_label = next((label for label in ("1학기", "2학기") if label in semester), semester)
@@ -159,11 +158,89 @@ def generate_ledger_workbook(
             ws.cell(row, 2, index + 1)
             for column in (4, 7, 11, 17, 24):
                 ws.cell(row, column, None)
+
+
+def generate_ledger_workbook(
+    output_path: Path,
+    club_name: str,
+    semester: str,
+    treasurer_name: str,
+    president_name: str,
+    opening_balance: int,
+    transactions: list[Transaction],
+    row_capacity: int,
+) -> dict:
+    row_capacity = _effective_row_capacity(row_capacity, len(transactions))
+    template_path = _official_template("ledger", row_capacity)
+    _convert_official_ledger_template(template_path, output_path)
+    wb = load_workbook(output_path)
+    _populate_ledger_sheet(
+        wb.active,
+        club_name,
+        semester,
+        treasurer_name,
+        president_name,
+        opening_balance,
+        transactions,
+        row_capacity,
+    )
     if hasattr(wb, "calculation"):
         wb.calculation.fullCalcOnLoad = True
         wb.calculation.forceFullCalc = True
     wb.save(output_path)
     return {"template_filename": _normalized(template_path.name), "template_sha256": file_sha256(template_path)}
+
+
+def generate_combined_ledger_workbook(
+    output_path: Path,
+    club_name: str,
+    semester: str,
+    treasurer_name: str,
+    president_name: str,
+    accounts: dict[str, dict],
+    row_capacity: int,
+) -> dict:
+    effective_capacity = _effective_row_capacity(
+        row_capacity,
+        max((len(bundle["transactions"]) for bundle in accounts.values()), default=0),
+    )
+    template_path = _official_template("ledger", effective_capacity)
+    _convert_official_ledger_template(template_path, output_path)
+    wb = load_workbook(output_path)
+    primary_sheet = wb.active
+    dues_sheet = wb.copy_worksheet(primary_sheet)
+    primary_sheet.title = "운영계좌"
+    dues_sheet.title = "회비입금계좌"
+    sheets = {"primary": primary_sheet, "dues_intake": dues_sheet}
+    sheet_labels = {"primary": "운영계좌", "dues_intake": "회비입금계좌"}
+    coverage: dict[str, dict] = {}
+    for account_id, ws in sheets.items():
+        bundle = accounts[account_id]
+        _populate_ledger_sheet(
+            ws,
+            club_name,
+            semester,
+            treasurer_name,
+            president_name,
+            int(bundle.get("opening_balance") or 0),
+            bundle["transactions"],
+            effective_capacity,
+            sheet_labels[account_id],
+        )
+        coverage[account_id] = {
+            "sheet_name": ws.title,
+            "transaction_rows": len(bundle["transactions"]),
+            "row_capacity": effective_capacity,
+        }
+    if hasattr(wb, "calculation"):
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+    wb.save(output_path)
+    return {
+        "template_filename": _normalized(template_path.name),
+        "template_sha256": file_sha256(template_path),
+        "accounts": coverage,
+    }
 
 
 def _add_contained_picture(paragraph, image_path: Path, max_width: float, max_height: float) -> None:
@@ -351,6 +428,90 @@ def generate_evidence_document(
     }
 
 
+def _document_font(size: int, bold: bool = False):
+    names = [
+        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf" if bold else "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    ]
+    for name in names:
+        if Path(name).exists():
+            return ImageFont.truetype(name, size=size)
+    return ImageFont.load_default(size=size)
+
+
+def _render_bank_transaction_pages(rows: list[dict], output_dir: Path, account_id: str) -> list[Path]:
+    if not rows:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    width, height = 1100, 900
+    margin, header_height, footer_height = 40, 110, 35
+    columns = [margin, 230, 650, 800, 950, width - margin]
+    title_font = _document_font(30, bold=True)
+    header_font = _document_font(19, bold=True)
+    body_font = _document_font(18)
+
+    prepared: list[dict] = []
+    for row in rows:
+        detail = " / ".join(
+            str(value).strip()
+            for value in (
+                row.get("description"),
+                row.get("transfer_message"),
+                row.get("counterparty_name"),
+                row.get("memo"),
+                row.get("transaction_type"),
+            )
+            if str(value or "").strip()
+        )
+        detail_lines = textwrap.wrap(detail or "-", width=30, break_long_words=True, break_on_hyphens=False)
+        prepared.append({**row, "detail_lines": detail_lines, "row_height": max(54, len(detail_lines) * 24 + 14)})
+
+    pages: list[list[dict]] = []
+    current: list[dict] = []
+    used_height = header_height + 80
+    for row in prepared:
+        if current and used_height + row["row_height"] > height - footer_height:
+            pages.append(current)
+            current = []
+            used_height = header_height + 80
+        current.append(row)
+        used_height += row["row_height"]
+    if current:
+        pages.append(current)
+
+    rendered: list[Path] = []
+    for page_index, page_rows in enumerate(pages, start=1):
+        image = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(image)
+        short_label = "운영계좌(토스뱅크)" if account_id == "primary" else "회비입금계좌(기업은행)"
+        draw.text((margin, 35), f"{short_label} 거래내역", fill="#172026", font=title_font)
+        draw.text((width - 150, 42), f"{page_index} / {len(pages)}", fill="#52646a", font=body_font)
+        top = header_height
+        labels = ("거래일시", "거래내용", "입출금액", "거래후잔액", "구분")
+        draw.rectangle((margin, top, width - margin, top + 58), fill="#e9f3df", outline="#829197", width=2)
+        for index, label in enumerate(labels):
+            draw.text((columns[index] + 10, top + 14), label, fill="#172026", font=header_font)
+            if index:
+                draw.line((columns[index], top, columns[index], top + 58), fill="#829197", width=2)
+        top += 58
+        for row in page_rows:
+            bottom = top + row["row_height"]
+            draw.rectangle((margin, top, width - margin, bottom), outline="#aab6ba", width=2)
+            for column in columns[1:-1]:
+                draw.line((column, top, column, bottom), fill="#aab6ba", width=2)
+            draw.text((columns[0] + 10, top + 12), str(row.get("occurred_at") or row.get("date") or "-"), fill="#172026", font=body_font)
+            draw.multiline_text((columns[1] + 10, top + 10), "\n".join(row["detail_lines"]), fill="#172026", font=body_font, spacing=3)
+            amount = int(row.get("amount") or 0)
+            draw.text((columns[2] + 10, top + 12), f"{amount:+,}", fill="#172026", font=body_font)
+            draw.text((columns[3] + 10, top + 12), f"{int(row.get('balance') or 0):,}", fill="#172026", font=body_font)
+            draw.text((columns[4] + 10, top + 12), str(row.get("transaction_type") or "-"), fill="#172026", font=body_font)
+            top = bottom
+        target = output_dir / f"{account_id}-{page_index:03d}.png"
+        image.crop((0, 0, width, min(height, top + footer_height))).save(target, "PNG", optimize=True)
+        rendered.append(target)
+    return rendered
+
+
 def generate_account_capture_document(
     output_path: Path,
     club_name: str,
@@ -380,6 +541,15 @@ def generate_account_capture_document(
             entries.append({"evidence": item, "page": page})
             embedded_pages += 1
 
+    bank_rows = bank_transactions or []
+    bank_page_count = 0
+    for account_id in ("primary", "dues_intake"):
+        account_rows = [row for row in bank_rows if row.get("account_id", "primary") == account_id]
+        pages = _render_bank_transaction_pages(account_rows, render_dir / f"bank-{account_id}", account_id)
+        bank_page_count += len(pages)
+        for page in pages:
+            entries.append({"account_id": account_id, "page": page, "bank_page": True})
+
     required_tables = max(1, (len(entries) + 3) // 4)
     _append_account_template_pages(doc, required_tables)
     for paragraph in doc.paragraphs:
@@ -392,14 +562,14 @@ def generate_account_capture_document(
         table = doc.tables[index // 4]
         position = index % 4
         cell = table.cell(position // 2, position % 2)
-        item = entry["evidence"]
-        label = f"<{index + 1}> {_account_label(item.account_id)}"
+        item = entry.get("evidence")
+        account_id = item.account_id if item else entry.get("account_id", "primary")
+        suffix = " 거래내역 표" if entry.get("bank_page") else ""
+        label = f"<{index + 1}> {_account_label(account_id)}{suffix}"
         if entry.get("page"):
             _fill_image_cell(cell, entry["page"], label, max_width=3.0, max_height=3.55)
         else:
             _set_cell_text(cell, f"{label}\n{entry['message']}")
-
-    bank_rows = bank_transactions or []
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
@@ -407,6 +577,8 @@ def generate_account_capture_document(
     return {
         "capture_file_count": len(captures),
         "embedded_capture_pages": embedded_pages,
+        "generated_bank_pages": bank_page_count,
+        "embedded_total_pages": embedded_pages + bank_page_count,
         "bank_transaction_rows": len(bank_rows),
         "unsupported_files": sorted(set(unsupported_files)),
         "account_breakdown": list(account_breakdown.values()),
@@ -653,6 +825,300 @@ def build_submission_package(
             {"kind": "ledger", "path": str(ledger_path), "sha256": file_sha256(ledger_path)},
             {"kind": "evidence", "path": str(evidence_path), "sha256": file_sha256(evidence_path)},
             {"kind": "account_captures", "path": str(captures_path), "sha256": file_sha256(captures_path)},
+            {"kind": "validation_report", "path": str(report_path), "sha256": file_sha256(report_path)},
+            {"kind": "manifest", "path": str(manifest_path), "sha256": manifest_hash},
+            {"kind": "zip", "path": str(zip_path), "sha256": zip_hash},
+        ],
+    }
+
+
+def _combined_validation(accounts: dict[str, dict]) -> dict:
+    account_results: dict[str, dict] = {}
+    issues: list[dict] = []
+    for account_id, bundle in accounts.items():
+        result = validate_ledger(
+            int(bundle.get("opening_balance") or 0),
+            bundle["transactions"],
+            bundle["evidence"],
+            bundle.get("expected_closing_balance"),
+            bundle.get("period_start"),
+            bundle.get("period_end"),
+            bundle.get("reconciliation"),
+        )
+        account_results[account_id] = result
+        for issue in result["issues"]:
+            issues.append(
+                {
+                    **issue,
+                    "code": f"{account_id}:{issue['code']}",
+                    "account_id": account_id,
+                    "account_label": _account_label(account_id),
+                }
+            )
+    error_count = sum(1 for issue in issues if issue["severity"] == "ERROR" and issue.get("status") != "ACKNOWLEDGED")
+    warning_count = sum(1 for issue in issues if issue["severity"] == "WARNING" and issue.get("status") != "ACKNOWLEDGED")
+    return {
+        "status": "ERROR" if error_count else "WARNING" if warning_count else "PASS",
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "issues": issues,
+        "accounts": account_results,
+        "summary": {
+            "transaction_count": sum(len(bundle["transactions"]) for bundle in accounts.values()),
+            "evidence_count": sum(len(bundle["evidence"]) for bundle in accounts.values()),
+            "total_income": sum(result["summary"]["total_income"] for result in account_results.values()),
+            "total_expense": sum(result["summary"]["total_expense"] for result in account_results.values()),
+        },
+    }
+
+
+def generate_combined_validation_report(output_path: Path, validation: dict, accounts: dict[str, dict]) -> None:
+    sections: list[str] = []
+    for account_id in ("primary", "dues_intake"):
+        result = validation["accounts"][account_id]
+        summary = result["summary"]
+        issue_rows = "\n".join(
+            f"<li><strong>{html.escape(issue['severity'])}</strong> "
+            f"{html.escape(issue['code'])}: {html.escape(issue['message'])}</li>"
+            for issue in result["issues"]
+        )
+        reconciliation = accounts[account_id].get("reconciliation")
+        reconciliation_rows = ""
+        if reconciliation:
+            reconciliation_rows = f"""
+      <tr><th>은행 마감잔액</th><td>{int(reconciliation.get('bank_closing_balance') or 0):,}원</td></tr>
+      <tr><th>잔액 차이</th><td>{int(reconciliation.get('balance_delta') or 0):,}원</td></tr>
+      <tr><th>자동 매칭</th><td>장부 {int(reconciliation.get('matched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('matched_bank_count') or 0):,}건</td></tr>"""
+        sections.append(
+            f"""
+    <section>
+      <h2>{html.escape(_account_label(account_id))}</h2>
+      <p class="status">상태: {html.escape(result['status'])}</p>
+      <table>
+        <tr><th>거래 건수</th><td>{summary['transaction_count']:,}건</td></tr>
+        <tr><th>이전잔액</th><td>{summary['opening_balance']:,}원</td></tr>
+        <tr><th>수입총액</th><td>{summary['total_income']:,}원</td></tr>
+        <tr><th>지출총액</th><td>{summary['total_expense']:,}원</td></tr>
+        <tr><th>계산 최종잔액</th><td>{summary['computed_closing_balance']:,}원</td></tr>
+        <tr><th>장부 최종잔액</th><td>{summary['reported_closing_balance']:,}원</td></tr>
+        {reconciliation_rows}
+      </table>
+      <h3>검증 항목</h3>
+      <ul>{issue_rows or '<li>검증 이슈가 없습니다.</li>'}</ul>
+    </section>"""
+        )
+    output_path.write_text(
+        f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>ATLAS 통합 검증 리포트</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 40px; color: #172026; }}
+    h1 {{ margin-bottom: 8px; }} section {{ margin-top: 34px; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+    th, td {{ border: 1px solid #c7d0d9; padding: 10px; text-align: left; }}
+    th {{ width: 220px; background: #e9f3df; }} .status {{ font-weight: 700; }}
+  </style>
+</head>
+<body>
+  <h1>ATLAS 동아리연합회 제출 패키지 검증 리포트</h1>
+  <p class="status">통합 상태: {html.escape(validation['status'])} · 오류 {validation['error_count']}건 · 경고 {validation['warning_count']}건</p>
+  {''.join(sections)}
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+
+
+def build_combined_submission_package(
+    output_root: Path,
+    package_id: str,
+    club_name: str,
+    semester: str,
+    treasurer_name: str,
+    president_name: str,
+    reviewer_name: str | None,
+    accounts: dict[str, dict],
+    row_capacity: int,
+    created_by: str = "system",
+) -> dict:
+    required_accounts = {"primary", "dues_intake"}
+    if set(accounts) != required_accounts:
+        raise ValueError("통합 동연 패키지에는 운영계좌와 회비입금계좌 장부가 모두 필요합니다.")
+
+    package_dir = output_root / package_id
+    package_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = output_root / f"{package_id}.zip"
+    ledger_path = package_dir / "동아리 수입지출관리대장.xlsx"
+    account_path = package_dir / "동아리 계좌 전체내역.docx"
+    evidence_paths = {
+        "primary": package_dir / "영수증 및 소명자료 - 동아리운영계좌.docx",
+        "dues_intake": package_dir / "영수증 및 소명자료 - 회비입금계좌.docx",
+    }
+    report_path = package_dir / "검증_리포트.html"
+    manifest_path = package_dir / "manifest.json"
+
+    validation = _combined_validation(accounts)
+    ledger_coverage = generate_combined_ledger_workbook(
+        ledger_path,
+        club_name,
+        semester,
+        treasurer_name,
+        president_name,
+        accounts,
+        row_capacity,
+    )
+    evidence_coverage = {
+        account_id: generate_evidence_document(
+            evidence_paths[account_id],
+            club_name,
+            treasurer_name,
+            reviewer_name,
+            accounts[account_id]["transactions"],
+            accounts[account_id]["evidence"],
+        )
+        for account_id in ("primary", "dues_intake")
+    }
+
+    combined_evidence: list[Evidence] = []
+    combined_bank_transactions: list[dict] = []
+    for account_id, bundle in accounts.items():
+        combined_evidence.extend(bundle["evidence"])
+        combined_bank_transactions.extend(
+            {**row, "account_id": account_id} for row in bundle.get("bank_transactions", [])
+        )
+        for index, source in enumerate(bundle.get("source_files", [])):
+            source_path = Path(str(source.get("local_path") or ""))
+            if source.get("kind") == "bank_workbook" and source_path.exists():
+                combined_evidence.append(
+                    Evidence(
+                        id=f"source-bank-{account_id}-{index}",
+                        transaction_number=None,
+                        filename=normalize_filename(str(source.get("filename") or source_path.name)),
+                        kind="account_capture",
+                        account_id=account_id,
+                        local_path=str(source_path),
+                    )
+                )
+    account_coverage = generate_account_capture_document(
+        account_path,
+        club_name,
+        president_name,
+        combined_evidence,
+        combined_bank_transactions,
+    )
+    generate_combined_validation_report(report_path, validation, accounts)
+
+    copied_evidence: list[dict] = []
+    copied_sources: list[dict] = []
+    account_folders = {"primary": "동아리운영계좌", "dues_intake": "회비입금계좌"}
+    for account_id, bundle in accounts.items():
+        evidence_dir = package_dir / "증빙 원본" / account_folders[account_id]
+        source_dir = package_dir / "원본자료" / account_folders[account_id]
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        source_dir.mkdir(parents=True, exist_ok=True)
+        for item in bundle["evidence"]:
+            source_path = Path(item.local_path or "")
+            if not source_path.exists():
+                continue
+            target = evidence_dir / f"{item.id}_{normalize_filename(item.filename or source_path.name)}"
+            shutil.copy2(source_path, target)
+            copied_evidence.append(
+                {
+                    "id": item.id,
+                    "account_id": account_id,
+                    "filename": normalize_filename(target.name),
+                    "relative_path": normalize_relative_path(target.relative_to(package_dir)),
+                    "sha256": file_sha256(target),
+                    "transaction_ids": list(item.transaction_ids),
+                    "transaction_number": item.transaction_number,
+                }
+            )
+        for source in bundle.get("source_files", []):
+            source_path = Path(str(source.get("local_path") or ""))
+            if not source_path.exists():
+                continue
+            target = source_dir / f"{source.get('kind', 'source')}_{normalize_filename(str(source.get('filename') or source_path.name))}"
+            shutil.copy2(source_path, target)
+            copied_sources.append(
+                {
+                    "account_id": account_id,
+                    "kind": source.get("kind", "source"),
+                    "filename": normalize_filename(target.name),
+                    "relative_path": normalize_relative_path(target.relative_to(package_dir)),
+                    "sha256": file_sha256(target),
+                }
+            )
+
+    generated_paths = [ledger_path, account_path, *evidence_paths.values(), report_path]
+    file_entries = [
+        {
+            "relative_path": normalize_relative_path(path.relative_to(package_dir)),
+            "size": path.stat().st_size,
+            "sha256": file_sha256(path),
+        }
+        for path in generated_paths
+    ]
+    for item in [*copied_evidence, *copied_sources]:
+        path = package_dir / item["relative_path"]
+        file_entries.append({"relative_path": item["relative_path"], "size": path.stat().st_size, "sha256": item["sha256"]})
+
+    document_coverage = {
+        "ledger": ledger_coverage,
+        "evidence_documents": evidence_coverage,
+        "account_document": account_coverage,
+        "copied_evidence_files": len(copied_evidence),
+        "copied_source_files": len(copied_sources),
+    }
+    manifest = {
+        "package_id": package_id,
+        "club_name": club_name,
+        "semester": semester,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_by": created_by,
+        "validation_rule_version": VALIDATION_RULE_VERSION,
+        "template_version": TEMPLATE_VERSION,
+        "accounts": {
+            account_id: {
+                "label": _account_label(account_id),
+                "snapshot_id": bundle.get("snapshot_id"),
+                "ledger_data_hash": bundle.get("ledger_data_hash"),
+                "transaction_count": len(bundle["transactions"]),
+                "evidence_count": len(bundle["evidence"]),
+                "reconciliation": bundle.get("reconciliation"),
+            }
+            for account_id, bundle in accounts.items()
+        },
+        "document_coverage": document_coverage,
+        "validation": validation,
+        "evidence": copied_evidence,
+        "source_files": copied_sources,
+        "files": file_entries,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in package_dir.rglob("*"):
+            if path.is_file():
+                archive.write(path, normalize_relative_path(path.relative_to(package_dir)))
+
+    zip_hash = file_sha256(zip_path)
+    manifest_hash = file_sha256(manifest_path)
+    effective_capacity = int(ledger_coverage["accounts"]["primary"]["row_capacity"])
+    return {
+        "zip_path": str(zip_path),
+        "zip_sha256": zip_hash,
+        "manifest_sha256": manifest_hash,
+        "manifest": manifest,
+        "document_coverage": document_coverage,
+        "row_capacity": effective_capacity,
+        "validation": validation,
+        "artifacts": [
+            {"kind": "combined_ledger", "path": str(ledger_path), "sha256": file_sha256(ledger_path)},
+            {"kind": "combined_account_history", "path": str(account_path), "sha256": file_sha256(account_path)},
+            {"kind": "primary_evidence", "path": str(evidence_paths["primary"]), "sha256": file_sha256(evidence_paths["primary"])},
+            {"kind": "dues_evidence", "path": str(evidence_paths["dues_intake"]), "sha256": file_sha256(evidence_paths["dues_intake"])},
             {"kind": "validation_report", "path": str(report_path), "sha256": file_sha256(report_path)},
             {"kind": "manifest", "path": str(manifest_path), "sha256": manifest_hash},
             {"kind": "zip", "path": str(zip_path), "sha256": zip_hash},
