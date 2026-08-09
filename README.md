@@ -43,15 +43,14 @@ docker compose up --build
 ## 화면 테스트 순서
 
 1. `관리자` 역할로 로그인한다.
-2. `장부·증빙`에서 Aegis 회계장부 `.xlsx`와 토스뱅크 거래내역 `.xlsx`를 선택한다.
-3. 영수증·소명자료·계좌 캡처의 종류와 장부 번호를 지정해 업로드한다.
-4. `실제 장부 가져오기`를 누르고 잔액 차이가 `0원`인지 확인한다.
-5. 증빙을 나중에 추가했다면 `증빙 반영 새 버전`으로 새 스냅샷을 만든다.
-6. `동연 패키지`에서 생성 후 작업 상태와 문서 포함 건수를 확인한다.
-7. 검증 오류가 없으면 `검토 요청`, `승인`, `ZIP 다운로드`를 차례로 실행한다.
-8. `월간 공개`에서 공개 페이지를 생성하고 새 창에서 내용을 확인한다.
-9. 테스트용 Discord Webhook으로 미리보기와 승인 흐름을 확인한다.
-10. `감사 로그`에서 해시 체인이 `CHAIN VALID`인지 확인한다.
+2. `장부·증빙`에서 두 Google 장부를 연결한다.
+3. 계좌 거래내역과 영수증·소명자료·계좌 캡처를 업로드한다.
+4. 거래 목록에서 두 계좌가 분리되어 표시되는지 확인한다.
+5. `동연 패키지`에서 두 계좌 상태가 `READY`인지 확인하고 패키지를 생성한다.
+6. 검증 오류가 없으면 `검토 요청`, `승인`, `ZIP 다운로드`를 차례로 실행한다.
+7. `월간 공개`에서 ATLAS 공개 페이지를 생성하고 새 창에서 내용을 확인한다.
+8. `월별 내역 전송`에서 직전 달 Google 시트를 생성한다.
+9. 테스트용 Discord Webhook으로 미리보기, 승인, 전송 흐름을 확인한다.
 
 실제 Discord 채널로 보내도 되는 경우에만 마지막 전송 버튼을 누른다.
 
@@ -170,13 +169,15 @@ Google Cloud Console에서 OAuth 클라이언트를 만들고 `.env`에 `GOOGLE_
 승인된 리디렉션 URI에는 로컬 테스트용 `http://localhost:5173/`와 운영 주소
 `https://<ATLAS_DOMAIN>/`를 등록한다. 백엔드 도메인 `https://<ATLAS_API_DOMAIN>/`는
 Google OAuth 리디렉션 URI가 아니라 API 호출과 CORS 대상이다.
-ATLAS는 계정 이메일과 읽기 전용 Sheets/Drive Scope만 요청하며 OAuth `state`는
-로그인 세션에 묶고 한 번 사용하면 폐기한다.
+ATLAS는 장부 읽기와 월별 공개 시트 생성·공유를 위해 Sheets/Drive 쓰기 Scope를 요청한다.
+월별 공개 대상 Spreadsheet는 파일 전체가 링크 공개되므로, 다른 내부 자료가 없는 공개 전용 파일을 사용한다.
+OAuth `state`는 로그인 세션에 묶고 한 번 사용하면 폐기한다. 이전 읽기 전용 연결이
+저장되어 있다면 화면에서 연결 해제 후 다시 연결해야 한다.
 
 OAuth 클라이언트가 속한 Google Cloud 프로젝트에서는 다음 API를 반드시 활성화한다.
 
-- Google Drive API: Sheets 파일 목록 조회와 Drive 증빙자료 조회에 사용
-- Google Sheets API: 선택한 스프레드시트 값 읽기에 사용
+- Google Drive API: 파일 조회와 월별 공개 Spreadsheet의 링크 공유 설정에 사용
+- Google Sheets API: 장부 읽기와 월별 공개 시트 생성·값 쓰기에 사용
 
 `Google Drive API has not been used ... or it is disabled` 오류가 나오면 해당 프로젝트의
 Google Drive API를 Enable하고 몇 분 뒤 다시 시도한다.
@@ -194,10 +195,12 @@ Google Drive API를 Enable하고 몇 분 뒤 다시 시도한다.
 - `GET /google/drive/files`
 - `POST /google/sheets/snapshot`
 - `POST /google/sheets/{spreadsheet_id}/snapshot`
+- `POST /monthly-reports/google-sheet`
 
 운영 장부는 화면의 `Google 자료 연결` 패널에서 Google 계정 연결 후 회계장부 URL 또는
 스프레드시트 ID를 입력하고 `Google 장부 가져오기`를 누르면 ATLAS 스냅샷으로 저장된다.
 운영에서 기본 장부 URL을 미리 채우려면 `.env`에 `ATLAS_DEFAULT_LEDGER_SHEET_URL`을 설정한다.
+월별 공개 대상 Spreadsheet를 미리 채우려면 `ATLAS_DEFAULT_MONTHLY_PUBLIC_SHEET_URL`을 설정한다.
 장부 데이터는 `B:I`(`No`, `날짜`, `내용`, `수입`, `지출`, `잔액`, `처리방식`,
 `상세정보`) 범위에서 가져온다. 시트 탭 이름이 필요한 경우 범위를 `시트명!B:I`
 형식으로 입력한다.
@@ -208,6 +211,7 @@ Google Drive API를 Enable하고 몇 분 뒤 다시 시도한다.
 - `POST /imports/workbook-snapshot`
 - `POST /evidence/upload`
 - `POST /ledger-snapshots/{snapshot_id}/evidence`
+- `POST /ledger-snapshots/{snapshot_id}/bank-transactions`
 - `POST /ledger-snapshots/{snapshot_id}/transactions`
 - `PUT /ledger-snapshots/{snapshot_id}/transactions/{transaction_id_or_number}`
 - `DELETE /ledger-snapshots/{snapshot_id}/transactions/{transaction_id_or_number}`

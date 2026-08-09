@@ -12,7 +12,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.services.google import _format_google_http_error, get_sheet_values
+from app.services.google import _format_google_http_error, get_sheet_values, publish_monthly_sheet
 from app.services.jobs import JobRunner
 from app.services.store import JsonStore
 
@@ -275,12 +275,89 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(imported["transactions"][1]["source_row"], "6")
         values_mock.assert_called_once_with("access-token", "test-ledger-sheet-id-1234567890", "B:I")
 
+    def test_previous_month_google_sheet_report_uses_public_sheet_for_discord(self) -> None:
+        main.store.insert(
+            "google_connections",
+            {
+                "account_email": "aegis@example.com",
+                "encrypted_access_token": main.secret_box.encrypt("access-token"),
+                "encrypted_refresh_token": main.secret_box.encrypt("refresh-token"),
+                "scopes": [],
+            },
+            "goog",
+        )
+        source_values = {
+            "range": "1학기!B:I",
+            "values": [
+                ["No", "날짜", "내용", "수입", "지출", "잔액", "처리방식", "상세정보"],
+                [1, "2026-06-30", "이전 달", 10_000, 0, 10_000, "계좌이체", ""],
+                [2, "2026-07-02", "7월 회비", 20_000, 0, 30_000, "계좌이체", "회원"],
+                [3, "2026-07-10", "7월 물품", 0, 5_000, 25_000, "카드결제", "상점"],
+            ],
+        }
+        published = {
+            "spreadsheet_id": "destination-sheet-id-1234567890",
+            "sheet_id": 777,
+            "sheet_title": "2026년 7월",
+            "public_url": "https://docs.google.com/spreadsheets/d/destination-sheet-id-1234567890/edit#gid=777",
+        }
+        with patch("app.main.previous_month_period", return_value=("2026-07", "2026년 7월")), patch(
+            "app.main.get_sheet_values", return_value=source_values
+        ), patch("app.main.publish_monthly_sheet", return_value=published) as publish_mock:
+            response = self.client.post(
+                "/monthly-reports/google-sheet",
+                headers=self.headers,
+                json={
+                    "source_spreadsheet_url_or_id": "source-sheet-id-123456789012",
+                    "destination_spreadsheet_url_or_id": "destination-sheet-id-1234567890",
+                    "range": "B:I",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()
+        self.assertEqual(report["transaction_count"], 2)
+        self.assertEqual(report["public_url"], published["public_url"])
+        values = publish_mock.call_args.args[3]
+        self.assertEqual(values[0], ["No", "날짜", "내용", "수입", "지출", "잔액", "처리방식", "상세정보"])
+        self.assertEqual([row[2] for row in values[1:]], ["7월 회비", "7월 물품"])
+
+        webhook = self.client.post(
+            "/discord/webhooks",
+            headers=self.headers,
+            json={"name": "monthly", "webhook_url": "https://discord.com/api/webhooks/123/token"},
+        ).json()
+        preview = self.client.post(
+            "/discord/messages/preview",
+            headers=self.headers,
+            json={"share_id": report["share_id"], "webhook_id": webhook["id"]},
+        )
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn(published["public_url"], preview.json()["preview"])
+
     def test_google_sheet_values_request_formats_dates_as_strings(self) -> None:
         with patch("app.services.google._api_get", return_value={"values": []}) as api_get:
             get_sheet_values("access-token", "sheet-id", "B:I")
 
         self.assertEqual(api_get.call_args.args[2]["valueRenderOption"], "UNFORMATTED_VALUE")
         self.assertEqual(api_get.call_args.args[2]["dateTimeRenderOption"], "FORMATTED_STRING")
+
+    def test_publish_monthly_sheet_creates_unique_public_tab(self) -> None:
+        responses = [
+            {"sheets": [{"properties": {"sheetId": 1, "title": "2026년 7월"}}]},
+            {"replies": [{"addSheet": {"properties": {"sheetId": 777, "title": "2026년 7월 (2)"}}}]},
+            {},
+            {"permissions": []},
+            {"id": "public-permission"},
+        ]
+        with patch("app.services.google._api_json", side_effect=responses) as request_mock:
+            result = publish_monthly_sheet("access-token", "sheet-id", "2026년 7월", [["No"], [1]])
+
+        self.assertEqual(result["sheet_title"], "2026년 7월 (2)")
+        self.assertEqual(result["sheet_id"], 777)
+        self.assertEqual(request_mock.call_count, 5)
+        permission_payload = request_mock.call_args_list[-1].args[3]
+        self.assertEqual(permission_payload, {"type": "anyone", "role": "reader", "allowFileDiscovery": False})
 
     def test_google_service_disabled_error_is_human_readable(self) -> None:
         detail = {

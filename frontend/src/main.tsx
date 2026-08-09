@@ -1,43 +1,38 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Archive,
   BookOpenCheck,
+  Check,
   CheckCircle2,
   Download,
   ExternalLink,
   FileArchive,
   FileSpreadsheet,
-  History,
-  Landmark,
   Link2,
+  LoaderCircle,
   LockKeyhole,
-  RefreshCw,
+  LogOut,
   ReceiptText,
-  Save,
+  RefreshCw,
   Send,
   ShieldCheck,
-  SquarePen,
-  Trash2,
-  Unlink,
   Upload,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/+$/, "");
-const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
 const CURRENT_YEAR = new Date().getFullYear();
-const DEFAULT_PERIOD_START = `${CURRENT_YEAR}-01-01`;
-const DEFAULT_PERIOD_END = `${CURRENT_YEAR}-12-31`;
+const PERIOD_START = `${CURRENT_YEAR}-01-01`;
+const PERIOD_END = `${CURRENT_YEAR}-12-31`;
+const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
 
 type AccountId = "primary" | "dues_intake";
+type RouteId = "package" | "ledger" | "public-report" | "monthly";
+type ToastState = { kind: "loading" | "success" | "error"; title: string; detail?: string };
+type Runner = <T>(label: string, action: () => Promise<T>) => Promise<T | undefined>;
 
-const ACCOUNT_LABELS: Record<AccountId, string> = {
-  primary: "동아리운영계좌(토스뱅크)",
-  dues_intake: "회비입금계좌(IBK기업은행)",
-};
-
-type TransactionInput = {
+type Transaction = {
   transaction_id?: string;
   account_id?: string;
   number: number;
@@ -49,890 +44,526 @@ type TransactionInput = {
   category?: string;
   processing_method?: string;
   details?: string;
-  note?: string;
   evidence_ids?: string[];
 };
 
-type EvidenceInput = {
-  id: string;
-  transaction_number?: number;
-  account_id?: "primary" | "dues_intake" | string;
-  filename: string;
-  kind: "receipt" | "explanation" | "account_capture" | "other";
-  accessible?: boolean;
-  amount?: number;
-  evidence_date?: string;
+const ACCOUNT_LABELS: Record<AccountId, string> = {
+  primary: "동아리운영계좌(토스뱅크)",
+  dues_intake: "회비입금계좌(IBK기업은행)",
 };
 
-type Tab = "ledger" | "package" | "public" | "discord" | "history";
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (init?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
-  if (!response.ok) {
-    throw await parseApiError(response);
-  }
-  return response.json() as Promise<T>;
+function routeFromPath(): RouteId {
+  const segment = window.location.pathname.split("/").filter(Boolean)[0];
+  return segment === "ledger" || segment === "public-report" || segment === "monthly" ? segment : "package";
 }
 
-async function parseApiError(response: Response): Promise<Error> {
-  const raw = await response.text();
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("text/html") || raw.trimStart().startsWith("<!DOCTYPE html")) {
-    return new Error(`서버 연결에 실패했습니다 (${response.status}). ATLAS 컨테이너와 Cloudflare Tunnel 상태를 확인해주세요.`);
-  }
-  let parsed: any = null;
-  try { parsed = JSON.parse(raw); } catch { /* Plain-text API response. */ }
-  return new Error(parsed?.detail || parsed?.message || raw || response.statusText);
+function previousMonthLabel(): string {
+  const date = new Date();
+  date.setDate(1);
+  date.setMonth(date.getMonth() - 1);
+  return `${date.getFullYear()}년 ${date.getMonth() + 1}월`;
 }
 
 function money(value: number): string {
   return `${Number(value || 0).toLocaleString("ko-KR")}원`;
 }
 
-function PublicReport() {
-  const shareId = window.location.pathname.split("/").pop() ?? "";
-  const [report, setReport] = useState<any>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    const robots = document.createElement("meta");
-    robots.name = "robots";
-    robots.content = "noindex,nofollow,noarchive";
-    document.head.appendChild(robots);
-    api<any>(`/public/monthly/${shareId}`).then(setReport).catch((err) => setError(err.message));
-    return () => robots.remove();
-  }, [shareId]);
-
-  if (error) return <main className="public-shell"><div className="empty-state"><LockKeyhole size={28} /><h1>공개 자료를 열 수 없습니다</h1><p>{error}</p></div></main>;
-  if (!report) return <main className="public-shell"><div className="empty-state"><RefreshCw className="spin" size={28} /><p>회계 자료를 확인하고 있습니다.</p></div></main>;
-
-  return (
-    <main className="public-shell">
-      <header className="public-heading">
-        <div><p>{report.club_name}</p><h1>{report.month} 회계 투명성 자료</h1></div>
-        <span className="verified"><ShieldCheck size={16} /> ATLAS 공개본</span>
-      </header>
-      <section className="metric-grid">
-        <Metric label="수입" value={money(report.summary.total_income)} />
-        <Metric label="지출" value={money(report.summary.total_expense)} />
-        <Metric label="잔액" value={money(report.summary.closing_balance)} />
-        <Metric label="거래 수" value={`${report.summary.transaction_count}건`} />
-      </section>
-      <section className="table-wrap"><h2>거래 내역</h2><TransactionTable rows={report.transactions} /></section>
-      <footer className="public-footer">계좌번호, 증빙 원본, 거래 상대방 및 내부 검토 정보는 공개되지 않습니다.</footer>
-    </main>
-  );
+async function parseApiError(response: Response): Promise<Error> {
+  const raw = await response.text();
+  if ((response.headers.get("content-type") || "").includes("text/html") || raw.trimStart().startsWith("<!DOCTYPE html")) {
+    return new Error(`서버 연결에 실패했습니다 (${response.status}).`);
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return new Error(parsed.detail || parsed.message || response.statusText);
+  } catch {
+    return new Error(raw || response.statusText);
+  }
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
+async function api<T>(path: string, token?: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("X-ATLAS-Token", token);
+  if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  if (!response.ok) throw await parseApiError(response);
+  return response.json() as Promise<T>;
 }
 
-function TransactionTable({ rows }: { rows: TransactionInput[] }) {
+function Toast({ toast, onClose }: { toast: ToastState | null; onClose: () => void }) {
+  if (!toast) return null;
+  const Icon = toast.kind === "loading" ? LoaderCircle : toast.kind === "success" ? Check : X;
   return (
-    <table>
-      <thead><tr><th>번호</th><th>날짜</th><th>분류</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th></tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.number}><td>{row.number}</td><td>{row.date}</td><td>{row.category || "미분류"}</td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td></tr>)}</tbody>
-    </table>
+    <div className={`toast toast-${toast.kind}`} role="status">
+      <Icon className={toast.kind === "loading" ? "spin" : ""} size={18} />
+      <div><strong>{toast.title}</strong>{toast.detail && <span>{toast.detail}</span>}</div>
+      {toast.kind !== "loading" && <button className="toast-close" aria-label="알림 닫기" onClick={onClose}><X size={16} /></button>}
+    </div>
   );
 }
 
 function StatusBadge({ value }: { value: string }) {
-  const normalized = value.toLowerCase();
-  return <span className={`badge badge-${normalized}`}>{value}</span>;
+  return <span className={`badge badge-${value.toLowerCase().split(" ").join("-")}`}>{value}</span>;
 }
 
-function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("package");
-  const [username, setUsername] = useState(() => window.sessionStorage.getItem("atlas_username") || "aegis-admin");
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState(() => window.sessionStorage.getItem("atlas_role") || "admin");
-  const [authToken, setAuthToken] = useState(() => window.sessionStorage.getItem("atlas_token") || "");
+function TransactionTable({ rows, accountFilter = "all" }: { rows: Transaction[]; accountFilter?: AccountId | "all" }) {
+  const visible = rows.filter((row) => accountFilter === "all" || (row.account_id || "primary") === accountFilter);
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead><tr><th>No</th><th>날짜</th><th>계좌</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>처리방식</th><th>상세정보</th><th>증빙</th></tr></thead>
+        <tbody>
+          {visible.map((row) => {
+            const accountId = row.account_id === "dues_intake" ? "dues_intake" : "primary";
+            return <tr key={`${accountId}:${row.transaction_id || row.number}`}><td>{row.number}</td><td>{row.date}</td><td><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span></td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td></tr>;
+          })}
+          {!visible.length && <tr><td className="empty-row" colSpan={10}>표시할 거래가 없습니다.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function useWorkspace(token: string, run: Runner) {
+  const [primarySnapshot, setPrimarySnapshot] = useState<any>(null);
+  const [duesSnapshot, setDuesSnapshot] = useState<any>(null);
+  const [googleConnection, setGoogleConnection] = useState<any>(null);
+  const [primarySource, setPrimarySource] = useState("");
+  const [duesSource, setDuesSource] = useState("");
+  const [monthlyDestination, setMonthlyDestination] = useState("");
+  const [range, setRange] = useState("B:I");
+
+  const applySnapshot = useCallback((snapshot: any) => {
+    if (!snapshot) return;
+    if (snapshot.account_id === "dues_intake") setDuesSnapshot(snapshot);
+    else setPrimarySnapshot(snapshot);
+  }, []);
+
+  const loadLatest = useCallback(async () => {
+    const summaries = await api<any[]>("/ledger-snapshots", token);
+    const latestPrimary = summaries.find((item) => item.account_id === "primary");
+    const latestDues = summaries.find((item) => item.account_id === "dues_intake");
+    const details = await Promise.all([
+      latestPrimary ? api<any>(`/ledger-snapshots/${latestPrimary.id}`, token) : null,
+      latestDues ? api<any>(`/ledger-snapshots/${latestDues.id}`, token) : null,
+    ]);
+    if (details[0]) setPrimarySnapshot(details[0]);
+    if (details[1]) setDuesSnapshot(details[1]);
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    loadLatest().catch(() => undefined);
+    api<any>("/config/defaults", token).then((defaults) => {
+      setPrimarySource(defaults.default_ledger_sheet_url || "");
+      setDuesSource(defaults.default_dues_ledger_sheet_url || "");
+      setMonthlyDestination(defaults.default_monthly_public_sheet_url || "");
+    }).catch(() => undefined);
+    api<any>("/auth/google/status", token).then(setGoogleConnection).catch(() => undefined);
+  }, [loadLatest, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    if (!code || !state) return;
+    const redirectUri = `${window.location.origin}/`;
+    run("Google 계정 연결", () => api<any>("/auth/google/connect", token, {
+      method: "POST",
+      body: JSON.stringify({ authorization_code: code, state, redirect_uri: redirectUri }),
+    })).then((result) => {
+      if (result) setGoogleConnection(result);
+      const returnPath = sessionStorage.getItem("atlas_google_return_path") || "/package";
+      sessionStorage.removeItem("atlas_google_return_path");
+      window.location.replace(returnPath);
+    });
+  }, [run, token]);
+
+  async function connectGoogle() {
+    const redirectUri = `${window.location.origin}/`;
+    sessionStorage.setItem("atlas_google_return_path", window.location.pathname);
+    const result = await run("Google 연결 준비", () => api<any>(`/auth/google/authorize-url?redirect_uri=${encodeURIComponent(redirectUri)}`, token));
+    if (result?.authorization_url) window.location.assign(result.authorization_url);
+  }
+
+  async function disconnectGoogle() {
+    const result = await run("Google 연결 해제", () => api<any>("/auth/google/disconnect", token, { method: "POST" }));
+    if (result) setGoogleConnection(result);
+  }
+
+  async function importGoogle(accountId: AccountId, periodStart: string, periodEnd: string) {
+    const source = accountId === "primary" ? primarySource : duesSource;
+    if (!source.trim()) {
+      return run(`${ACCOUNT_LABELS[accountId]} 장부 연결`, async () => {
+        throw new Error("Google Sheets URL 또는 ID를 입력해주세요.");
+      });
+    }
+    const result = await run(`${ACCOUNT_LABELS[accountId]} 장부 연결`, () => api<any>("/google/sheets/snapshot", token, {
+      method: "POST",
+      body: JSON.stringify({
+        spreadsheet_url_or_id: source.trim(),
+        range: range.trim() || "B:I",
+        period: `${CURRENT_YEAR}년`,
+        period_start: periodStart,
+        period_end: periodEnd,
+        opening_balance: 0,
+        organization_id: "aegis",
+        account_id: accountId,
+      }),
+    }));
+    if (result) applySnapshot(result);
+    return result;
+  }
+
+  return {
+    primarySnapshot, duesSnapshot, applySnapshot, loadLatest,
+    googleConnection, connectGoogle, disconnectGoogle, importGoogle,
+    primarySource, setPrimarySource, duesSource, setDuesSource,
+    monthlyDestination, setMonthlyDestination, range, setRange,
+  };
+}
+
+function GooglePanel({ workspace, fixedStart = false }: { workspace: ReturnType<typeof useWorkspace>; fixedStart?: boolean }) {
+  const connected = Boolean(workspace.googleConnection?.connected);
+  return (
+    <section className="panel google-panel">
+      <div className="panel-heading"><div><p className="eyebrow">GOOGLE SHEETS</p><h3>Google 자료 연결</h3></div><StatusBadge value={connected ? "CONNECTED" : "DISCONNECTED"} /></div>
+      <p className="muted">{connected ? workspace.googleConnection.account_email : "Aegis Google 계정을 연결해주세요."}</p>
+      <div className="google-fields">
+        <label>{ACCOUNT_LABELS.primary}<input value={workspace.primarySource} onChange={(event) => workspace.setPrimarySource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label>
+        <label>{ACCOUNT_LABELS.dues_intake}<input value={workspace.duesSource} onChange={(event) => workspace.setDuesSource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label>
+        <label>범위<input value={workspace.range} onChange={(event) => workspace.setRange(event.target.value)} placeholder="B:I" /></label>
+      </div>
+      <div className="button-row">
+        {connected ? <button className="secondary danger" onClick={workspace.disconnectGoogle}><LogOut size={16} /> 연결 해제</button> : <button onClick={workspace.connectGoogle}><Link2 size={16} /> 계정 연결</button>}
+        <button className="secondary" disabled={!connected} onClick={() => workspace.importGoogle("primary", fixedStart ? PERIOD_START : PERIOD_START, PERIOD_END)}><FileSpreadsheet size={16} /> 운영 장부 연결</button>
+        <button className="secondary" disabled={!connected} onClick={() => workspace.importGoogle("dues_intake", fixedStart ? PERIOD_START : PERIOD_START, PERIOD_END)}><FileSpreadsheet size={16} /> 회비 장부 연결</button>
+      </div>
+    </section>
+  );
+}
+
+function LedgerPage({ token, run }: { token: string; run: Runner }) {
+  const workspace = useWorkspace(token, run);
+  const [periodStart, setPeriodStart] = useState(PERIOD_START);
+  const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
+  const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
+  const [uploadAccount, setUploadAccount] = useState<AccountId>("primary");
+  const [evidenceAccount, setEvidenceAccount] = useState<AccountId | "auto">("auto");
+  const [evidenceNumber, setEvidenceNumber] = useState("");
+  const rows = useMemo(() => [...(workspace.primarySnapshot?.transactions || []), ...(workspace.duesSnapshot?.transactions || [])], [workspace.primarySnapshot, workspace.duesSnapshot]);
+
+  async function importLedger(accountId: AccountId) {
+    await workspace.importGoogle(accountId, periodStart, periodEnd);
+  }
+
+  async function uploadBank(file: File) {
+    const snapshot = uploadAccount === "primary" ? workspace.primarySnapshot : workspace.duesSnapshot;
+    if (!snapshot?.id) {
+      await run("계좌 거래내역 연결", async () => { throw new Error(`${ACCOUNT_LABELS[uploadAccount]} 장부를 먼저 연결해주세요.`); });
+      return;
+    }
+    const form = new FormData();
+    form.append("file", file);
+    const upload = await run("계좌 거래내역 업로드", () => api<any>("/imports/upload", token, { method: "POST", body: form }));
+    if (!upload) return;
+    const revision = await run("계좌 거래내역 연결", () => api<any>(`/ledger-snapshots/${snapshot.id}/bank-transactions`, token, { method: "POST", body: JSON.stringify({ upload_id: upload.id }) }));
+    if (revision) workspace.applySnapshot(revision);
+  }
+
+  async function uploadEvidence(files: FileList) {
+    const uploaded = await run("영수증·소명·캡처 업로드", async () => {
+      const results = [];
+      for (const file of Array.from(files)) {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("kind", "auto");
+        if (evidenceAccount !== "auto") form.append("account_id", evidenceAccount);
+        if (evidenceNumber) form.append("transaction_number", evidenceNumber);
+        results.push(await api<any>("/evidence/upload", token, { method: "POST", body: form }));
+      }
+      return results;
+    });
+    if (!uploaded?.length) return;
+    for (const accountId of ["primary", "dues_intake"] as AccountId[]) {
+      const snapshot = accountId === "primary" ? workspace.primarySnapshot : workspace.duesSnapshot;
+      const ids = uploaded.filter((item: any) => item.account_id === accountId).map((item: any) => item.id);
+      if (!snapshot?.id || !ids.length) continue;
+      const revision = await run(`${ACCOUNT_LABELS[accountId]} 증빙 연결`, () => api<any>(`/ledger-snapshots/${snapshot.id}/evidence`, token, { method: "POST", body: JSON.stringify({ evidence_ids: ids }) }));
+      if (revision) workspace.applySnapshot(revision);
+    }
+  }
+
+  return <>
+    <PageHeading eyebrow="LEDGER & EVIDENCE" title="장부·증빙" description="원본 장부를 연결하고 계좌 거래내역과 증빙을 매칭합니다." />
+    <section className="period-strip">
+      <label>시작일<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
+      <label>종료일<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
+    </section>
+    <GooglePanel workspace={{ ...workspace, importGoogle: (accountId) => workspace.importGoogle(accountId, periodStart, periodEnd) }} />
+    <section className="panel compact-import">
+      <div className="panel-heading"><div><p className="eyebrow">FILES</p><h3>실제 파일 가져오기</h3></div></div>
+      <div className="file-controls">
+        <div className="file-control">
+          <label>계좌<select value={uploadAccount} onChange={(event) => setUploadAccount(event.target.value as AccountId)}><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></label>
+          <label className="file-button"><Upload size={16} /> 계좌 거래내역<input type="file" accept=".xlsx,.xlsm,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadBank(file).catch(() => undefined); event.currentTarget.value = ""; }} /></label>
+        </div>
+        <div className="file-control evidence-control">
+          <label>계좌 분류<select value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></label>
+          <label>장부 ID<input type="number" min="1" value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="파일명에 없을 때" /></label>
+          <label className="file-button"><ReceiptText size={16} /> 영수증·소명·캡처<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
+        </div>
+      </div>
+    </section>
+    <section className="panel transaction-panel">
+      <div className="panel-heading"><div><p className="eyebrow">TRANSACTIONS</p><h3>거래 목록</h3></div><select className="inline-select" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as AccountId | "all")}><option value="all">전체 계좌</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></div>
+      <TransactionTable rows={rows} accountFilter={accountFilter} />
+    </section>
+  </>;
+}
+
+function PackagePage({ token, run }: { token: string; run: Runner }) {
+  const workspace = useWorkspace(token, run);
   const [clubName, setClubName] = useState("Aegis");
-  const [semester, setSemester] = useState("2026년 1학기");
-  const [month, setMonth] = useState("2026년 3월");
-  const [primaryPeriodStart, setPrimaryPeriodStart] = useState(DEFAULT_PERIOD_START);
-  const [primaryPeriodEnd, setPrimaryPeriodEnd] = useState(DEFAULT_PERIOD_END);
-  const [primaryOpeningBalance, setPrimaryOpeningBalance] = useState(0);
-  const [primaryExpectedClosingBalance, setPrimaryExpectedClosingBalance] = useState(0);
-  const [duesPeriodStart, setDuesPeriodStart] = useState(DEFAULT_PERIOD_START);
-  const [duesPeriodEnd, setDuesPeriodEnd] = useState(DEFAULT_PERIOD_END);
-  const [duesOpeningBalance, setDuesOpeningBalance] = useState(0);
-  const [duesExpectedClosingBalance, setDuesExpectedClosingBalance] = useState(0);
+  const [semester, setSemester] = useState(`${CURRENT_YEAR}년 1학기`);
   const [treasurerName, setTreasurerName] = useState("회계담당자");
   const [presidentName, setPresidentName] = useState("회장");
   const [reviewerName, setReviewerName] = useState("검토자");
-  const [primarySnapshot, setPrimarySnapshot] = useState<any>(null);
-  const [duesSnapshot, setDuesSnapshot] = useState<any>(null);
-  const [primaryTransactions, setPrimaryTransactions] = useState<TransactionInput[]>([]);
-  const [primaryEvidence, setPrimaryEvidence] = useState<EvidenceInput[]>([]);
-  const [duesTransactions, setDuesTransactions] = useState<TransactionInput[]>([]);
-  const [duesEvidence, setDuesEvidence] = useState<EvidenceInput[]>([]);
-  const [primaryLedgerUpload, setPrimaryLedgerUpload] = useState<any>(null);
-  const [primaryBankUpload, setPrimaryBankUpload] = useState<any>(null);
-  const [primaryEvidenceUploads, setPrimaryEvidenceUploads] = useState<any[]>([]);
-  const [duesLedgerUpload, setDuesLedgerUpload] = useState<any>(null);
-  const [duesBankUpload, setDuesBankUpload] = useState<any>(null);
-  const [duesEvidenceUploads, setDuesEvidenceUploads] = useState<any[]>([]);
-  const [ledgerAccountId, setLedgerAccountId] = useState<AccountId>("primary");
-  const [evidenceKind, setEvidenceKind] = useState<EvidenceInput["kind"]>("receipt");
-  const [evidenceTransactionNumber, setEvidenceTransactionNumber] = useState("");
-  const [duesSheetSource, setDuesSheetSource] = useState("");
-  const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
-  const [editingTransactionKey, setEditingTransactionKey] = useState("");
-  const [transactionDraft, setTransactionDraft] = useState<TransactionInput>({
-    number: 1,
-    date: "",
-    description: "",
-    income: 0,
-    expense: 0,
-    balance: 0,
-    category: "미분류",
-    processing_method: "",
-    details: "",
-    note: "",
-    evidence_ids: [],
-    account_id: "primary",
-  });
-  const [googleConnection, setGoogleConnection] = useState<any>(null);
-  const [googleSheetSource, setGoogleSheetSource] = useState("");
-  const [googleSheetRange, setGoogleSheetRange] = useState("B:I");
-  const [packageData, setPackageData] = useState<any>(null);
+  const [evidenceAccount, setEvidenceAccount] = useState<AccountId | "auto">("auto");
   const [job, setJob] = useState<any>(null);
+  const [packageData, setPackageData] = useState<any>(null);
+  const primary = workspace.primarySnapshot;
+  const dues = workspace.duesSnapshot;
+  const primaryHistory = (primary?.evidence || []).filter((item: any) => item.kind === "account_capture").length || Number(Boolean(primary?.source?.bank_transactions?.length));
+  const duesHistory = (dues?.evidence || []).filter((item: any) => item.kind === "account_capture").length || Number(Boolean(dues?.source?.bank_transactions?.length));
+  const ready = Boolean(primary?.id && dues?.id && primaryHistory && duesHistory);
+
+  async function uploadEvidence(files: FileList) {
+    const uploaded = await run("패키지 자료 업로드", async () => {
+      const results = [];
+      for (const file of Array.from(files)) {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("kind", "auto");
+        if (evidenceAccount !== "auto") form.append("account_id", evidenceAccount);
+        results.push(await api<any>("/evidence/upload", token, { method: "POST", body: form }));
+      }
+      return results;
+    });
+    if (!uploaded?.length) return;
+    for (const accountId of ["primary", "dues_intake"] as AccountId[]) {
+      const snapshot = accountId === "primary" ? primary : dues;
+      const ids = uploaded.filter((item: any) => item.account_id === accountId).map((item: any) => item.id);
+      if (!snapshot?.id || !ids.length) continue;
+      const revision = await run(`${ACCOUNT_LABELS[accountId]} 자료 연결`, () => api<any>(`/ledger-snapshots/${snapshot.id}/evidence`, token, { method: "POST", body: JSON.stringify({ evidence_ids: ids }) }));
+      if (revision) workspace.applySnapshot(revision);
+    }
+  }
+
+  async function waitForJob(jobId: string, packageId: string) {
+    const started = Date.now();
+    while (Date.now() - started < JOB_MAX_WAIT_MS) {
+      const current = await api<any>(`/jobs/${jobId}`, token);
+      setJob(current);
+      if (current.status === "completed") return api<any>(`/packages/${packageId}`, token);
+      if (current.status === "failed") throw new Error(current.error || "문서 생성에 실패했습니다.");
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    }
+    throw new Error("문서 생성이 30분 이상 진행 중입니다.");
+  }
+
+  async function createPackage() {
+    if (!ready) throw new Error("두 계좌 장부와 계좌 전체내역을 모두 준비해주세요.");
+    const result = await run("동연 패키지 생성", async () => {
+      const created = await api<any>("/packages/submission", token, {
+        method: "POST",
+        body: JSON.stringify({
+          club_name: clubName,
+          organization_id: "aegis",
+          semester,
+          period_start: PERIOD_START,
+          primary_snapshot_id: primary.id,
+          dues_snapshot_id: dues.id,
+          treasurer_name: treasurerName,
+          president_name: presidentName,
+          reviewer_name: reviewerName,
+          opening_balance: 0,
+          primary_opening_balance: 0,
+          primary_expected_closing_balance: Number(primary.transactions?.at(-1)?.balance || 0),
+          dues_opening_balance: 0,
+          dues_expected_closing_balance: Number(dues.transactions?.at(-1)?.balance || 0),
+          row_capacity: 40,
+        }),
+      });
+      setJob(created);
+      return waitForJob(created.job_id, created.package_id);
+    });
+    if (result) setPackageData(result);
+  }
+
+  async function downloadPackage() {
+    if (!packageData?.id) return;
+    const response = await fetch(`${API_BASE}/packages/${packageData.id}/download`, { headers: { "X-ATLAS-Token": token } });
+    if (!response.ok) throw await parseApiError(response);
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${clubName}_${semester}_동연제출.zip`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return <>
+    <PageHeading eyebrow="SUBMISSION PACKAGE" title="동아리연합회 제출 패키지" description={`${PERIOD_START}부터 두 계좌의 장부와 증빙을 공식 양식에 반영합니다.`} badge={<StatusBadge value={packageData?.status || (ready ? "READY" : "PREPARING")} />} />
+    <section className="package-readiness">
+      <AccountReadiness accountId="primary" snapshot={primary} historyCount={primaryHistory} />
+      <AccountReadiness accountId="dues_intake" snapshot={dues} historyCount={duesHistory} />
+    </section>
+    <GooglePanel workspace={workspace} fixedStart />
+    <section className="package-upload-compact">
+      <div><ReceiptText size={18} /><span><strong>영수증·소명·계좌 전체내역</strong><small>#장부ID# 운영계좌 · *장부ID* 회비계좌</small></span></div>
+      <select aria-label="업로드 계좌 분류" value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">운영계좌</option><option value="dues_intake">회비계좌</option></select>
+      <label className="file-button"><Upload size={16} /> 일괄 등록<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
+    </section>
+    <section className="workspace-grid package-controls">
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DETAILS</p><h3>제출 정보</h3></div></div><div className="form-grid"><label>동아리명<input value={clubName} onChange={(event) => setClubName(event.target.value)} /></label><label>회계 기간<input value={semester} onChange={(event) => setSemester(event.target.value)} /></label><label>회계담당자<input value={treasurerName} onChange={(event) => setTreasurerName(event.target.value)} /></label><label>회장<input value={presidentName} onChange={(event) => setPresidentName(event.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} /></label><label>시작일<input value={PERIOD_START} disabled /></label></div></div>
+      <div className="panel job-panel"><div className="panel-heading"><div><p className="eyebrow">STATUS</p><h3>현재 작업</h3></div>{job?.status && <StatusBadge value={job.status} />}</div>{packageData?.validation ? <><div className="validation-summary"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div><dl className="coverage"><div><dt>운영 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.primary?.transaction_rows || 0}건</dd></div><div><dt>회비 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.dues_intake?.transaction_rows || 0}건</dd></div><div><dt>운영 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.primary?.embedded_files || 0}개</dd></div><div><dt>회비 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.dues_intake?.embedded_files || 0}개</dd></div></dl></> : <p className="muted">두 계좌의 준비 상태를 확인한 뒤 패키지를 생성합니다.</p>}</div>
+    </section>
+    <section className="action-bar">
+      <button disabled={!ready} onClick={() => createPackage().catch(() => undefined)}><FileArchive size={17} /> 통합 패키지 생성</button>
+      <button className="secondary" disabled={packageData?.status !== "draft"} onClick={async () => { const result = await run("검토 요청", () => api<any>(`/packages/${packageData.id}/submit-review`, token, { method: "POST" })); if (result) setPackageData(result); }}><ShieldCheck size={17} /> 검토 요청</button>
+      <button className="approve" disabled={packageData?.status !== "pending_review"} onClick={async () => { const result = await run("패키지 승인", () => api<any>(`/packages/${packageData.id}/approve`, token, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button>
+      <button className="secondary" disabled={!packageData?.zip_path} onClick={() => run("ZIP 다운로드", downloadPackage)}><Download size={17} /> ZIP 다운로드</button>
+    </section>
+  </>;
+}
+
+function AccountReadiness({ accountId, snapshot, historyCount }: { accountId: AccountId; snapshot: any; historyCount: number }) {
+  const ready = Boolean(snapshot?.id && historyCount);
+  const evidence = (snapshot?.evidence || []).filter((item: any) => item.kind !== "account_capture").length;
+  return <article className={ready ? "ready" : ""}><div className="readiness-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={ready ? "READY" : "REQUIRED"} /></div><dl><div><dt>장부</dt><dd>{snapshot?.transactions?.length ? `${snapshot.transactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{evidence}개</dd></div><div><dt>계좌 전체내역</dt><dd>{historyCount ? `${historyCount}개` : "필요"}</dd></div></dl></article>;
+}
+
+function PublicReportAdminPage({ token, run }: { token: string; run: Runner }) {
+  const workspace = useWorkspace(token, run);
+  const [month, setMonth] = useState(previousMonthLabel());
+  const [report, setReport] = useState<any>(null);
+  const primary = workspace.primarySnapshot;
+  const openingBalance = primary?.transactions?.length ? Number(primary.transactions[0].balance) - Number(primary.transactions[0].income || 0) + Number(primary.transactions[0].expense || 0) : 0;
+
+  return <>
+    <PageHeading eyebrow="MEMBER DISCLOSURE" title="월간 공개" description="동아리 회원에게 공유할 ATLAS 공개 페이지를 생성합니다." badge={report && <StatusBadge value={report.status || "ACTIVE"} />} />
+    <section className="workspace-grid">
+      <div className="panel"><div className="panel-heading"><h3>공개 설정</h3></div><div className="form-grid"><label>공개 월<input value={month} onChange={(event) => setMonth(event.target.value)} /></label><label>사용 장부<input value={primary?.id || "동아리운영계좌 장부 미등록"} disabled /></label></div></div>
+      <div className="panel privacy-panel"><h3>공개 범위</h3><p>계좌번호, 증빙 원본, 거래 상대방, 내부 검토 정보는 공개하지 않습니다.</p></div>
+    </section>
+    <section className="action-bar">
+      <button disabled={!primary?.id} onClick={async () => { const result = await run("월간 공개 페이지 생성", () => api<any>("/monthly-reports", token, { method: "POST", body: JSON.stringify({ club_name: "Aegis", month, snapshot_id: primary.id, opening_balance: openingBalance, visible_notes: false, allow_download: false }) })); if (result) setReport({ ...result, status: "active" }); }}><Link2 size={17} /> 공개 페이지 생성</button>
+      <button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button>
+    </section>
+    {report?.public_url && <div className="link-output"><Link2 size={17} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a></div>}
+  </>;
+}
+
+function MonthlyDeliveryPage({ token, run }: { token: string; run: Runner }) {
+  const workspace = useWorkspace(token, run);
   const [report, setReport] = useState<any>(null);
   const [webhookName, setWebhookName] = useState("Aegis 회계 공지");
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhook, setWebhook] = useState<any>(null);
   const [message, setMessage] = useState<any>(null);
-  const [auditData, setAuditData] = useState<any>(null);
-  const [output, setOutput] = useState<any>(null);
-  const [busy, setBusy] = useState("");
+  const googleWritable = Boolean(workspace.googleConnection?.connected && workspace.googleConnection?.write_access);
+
+  useEffect(() => {
+    api<any[]>("/monthly-reports", token).then((rows) => setReport(rows.find((item) => item.source_type === "google_sheet") || null)).catch(() => undefined);
+    api<any[]>("/discord/webhooks", token).then((rows) => setWebhook(rows[0] || null)).catch(() => undefined);
+  }, [token]);
+
+  async function publish() {
+    if (!workspace.primarySource.trim() || !workspace.monthlyDestination.trim()) {
+      await run("월별 공개 시트 생성", async () => { throw new Error("원본 장부와 공개 대상 Google Sheets를 입력해주세요."); });
+      return;
+    }
+    const result = await run(`${previousMonthLabel()} 공개 시트 생성`, () => api<any>("/monthly-reports/google-sheet", token, {
+      method: "POST",
+      body: JSON.stringify({ source_spreadsheet_url_or_id: workspace.primarySource, destination_spreadsheet_url_or_id: workspace.monthlyDestination, range: workspace.range, club_name: "Aegis" }),
+    }));
+    if (result) { setReport(result); setMessage(null); }
+  }
+
+  return <>
+    <PageHeading eyebrow="MONTHLY DELIVERY" title="월별 내역 전송" description={`${previousMonthLabel()} 동아리운영계좌 내역을 Google Sheets로 공개하고 Discord에 전송합니다.`} badge={message && <StatusBadge value={message.status} />} />
+    <section className="workspace-grid">
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">GOOGLE SHEETS</p><h3>공개 시트</h3></div><StatusBadge value={googleWritable ? "CONNECTED" : workspace.googleConnection?.connected ? "RECONNECT" : "DISCONNECTED"} /></div><div className="form-stack"><label>원본 동아리운영계좌 장부<input value={workspace.primarySource} onChange={(event) => workspace.setPrimarySource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label><label>공개 대상 Google Sheets<input value={workspace.monthlyDestination} onChange={(event) => workspace.setMonthlyDestination(event.target.value)} placeholder="새 월별 시트를 추가할 Spreadsheet" /></label><p className="sharing-warning">대상 Spreadsheet 파일 전체가 링크 공개됩니다. 월별 회원 공개 전용 파일을 지정하세요.</p><label>원본 범위<input value={workspace.range} onChange={(event) => workspace.setRange(event.target.value)} /></label></div><div className="button-row">{workspace.googleConnection?.connected ? <button className="secondary danger" onClick={workspace.disconnectGoogle}><LogOut size={16} /> 연결 해제</button> : <button onClick={workspace.connectGoogle}><Link2 size={16} /> Google 계정 연결</button>}<button disabled={!googleWritable} onClick={() => publish().catch(() => undefined)}><FileSpreadsheet size={16} /> {previousMonthLabel()} 시트 생성</button></div>{report?.public_url && <div className="link-output compact"><Link2 size={16} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.sheet_title || report.month}</a></div>}</div>
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DISCORD</p><h3>전송 승인</h3></div></div><div className="form-stack"><label>Webhook 이름<input value={webhookName} onChange={(event) => setWebhookName(event.target.value)} /></label><label>Webhook URL<input type="password" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} placeholder={webhook?.masked_url || "https://discord.com/api/webhooks/..."} /></label></div><div className="approval-flow"><span className={message ? "done" : ""}>미리보기</span><i /><span className={["approved", "sent"].includes(message?.status) ? "done" : ""}>승인</span><i /><span className={message?.status === "sent" ? "done" : ""}>전송</span></div>{message?.preview && <pre className="message-preview">{message.preview}</pre>}</div>
+    </section>
+    <section className="action-bar">
+      <button className="secondary" disabled={!webhookUrl} onClick={async () => { const result = await run("Discord Webhook 저장", () => api<any>("/discord/webhooks", token, { method: "POST", body: JSON.stringify({ name: webhookName, webhook_url: webhookUrl }) })); if (result) { setWebhook(result); setWebhookUrl(""); } }}><ShieldCheck size={17} /> Webhook 저장</button>
+      <button className="secondary" disabled={!report?.share_id || !webhook?.id} onClick={async () => { const result = await run("Discord 메시지 미리보기", () => api<any>("/discord/messages/preview", token, { method: "POST", body: JSON.stringify({ share_id: report.share_id, webhook_id: webhook.id }) })); if (result) setMessage(result); }}><ReceiptText size={17} /> 미리보기</button>
+      <button className="approve" disabled={message?.status !== "pending_approval"} onClick={async () => { const result = await run("Discord 메시지 승인", () => api<any>(`/discord/messages/${message.message_id}/approve`, token, { method: "POST" })); if (result) setMessage(result); }}><CheckCircle2 size={17} /> 승인</button>
+      <button disabled={!(["approved", "failed"].includes(message?.status))} onClick={async () => { const result = await run("Discord 메시지 전송", () => api<any>(`/discord/messages/${message.message_id}/send`, token, { method: "POST" })); if (result) setMessage(result); }}><Send size={17} /> 전송</button>
+    </section>
+  </>;
+}
+
+function PageHeading({ eyebrow, title, description, badge }: { eyebrow: string; title: string; description: string; badge?: React.ReactNode }) {
+  return <section className="section-head"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2><p>{description}</p></div>{badge}</section>;
+}
+
+function PublicReport() {
+  const shareId = window.location.pathname.split("/").pop() || "";
+  const [report, setReport] = useState<any>(null);
   const [error, setError] = useState("");
+  useEffect(() => { api<any>(`/public/monthly/${shareId}`).then(setReport).catch((err) => setError(err.message)); }, [shareId]);
+  if (error) return <main className="public-shell"><div className="empty-state"><LockKeyhole size={28} /><h1>공개 자료를 열 수 없습니다</h1><p>{error}</p></div></main>;
+  if (!report) return <main className="public-shell"><div className="empty-state"><LoaderCircle className="spin" size={28} /><p>회계 자료를 확인하고 있습니다.</p></div></main>;
+  return <main className="public-shell"><header className="public-heading"><div className="brand"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>{report.club_name}</p><h1>{report.month} 회계 투명성 자료</h1></div></div><span className="verified"><ShieldCheck size={16} /> ATLAS 공개본</span></header><section className="public-metrics"><div><span>수입</span><strong>{money(report.summary.total_income)}</strong></div><div><span>지출</span><strong>{money(report.summary.total_expense)}</strong></div><div><span>잔액</span><strong>{money(report.summary.closing_balance)}</strong></div><div><span>거래</span><strong>{report.summary.transaction_count}건</strong></div></section><section className="panel transaction-panel"><div className="panel-heading"><h3>거래 내역</h3></div><TransactionTable rows={report.transactions} /></section></main>;
+}
 
-  const transactions = useMemo(() => {
-    const merged = [...primaryTransactions, ...duesTransactions];
-    return merged.sort((a, b) => a.number - b.number);
-  }, [primaryTransactions, duesTransactions]);
-
-  function setAccountTransactions(accountId: string, txns: TransactionInput[]) {
-    if (accountId === "dues_intake") {
-      setDuesTransactions([...txns].sort((a, b) => a.number - b.number));
-    } else {
-      setPrimaryTransactions([...txns].sort((a, b) => a.number - b.number));
-    }
-  }
-
-  function setAccountEvidence(accountId: string, ev: EvidenceInput[]) {
-    if (accountId === "dues_intake") {
-      setDuesEvidence([...ev]);
-    } else {
-      setPrimaryEvidence([...ev]);
-    }
-  }
-
-  function setAccountSnapshot(accountId: string, snap: any) {
-    if (accountId === "dues_intake") {
-      setDuesSnapshot(snap);
-    } else {
-      setPrimarySnapshot(snap);
-    }
-  }
-
-  const activeAccountId = ledgerAccountId;
-  const activeTransactions = activeAccountId === "dues_intake" ? duesTransactions : primaryTransactions;
-  const activeEvidence = activeAccountId === "dues_intake" ? duesEvidence : primaryEvidence;
-  const snapshot = activeAccountId === "dues_intake" ? duesSnapshot : primarySnapshot;
-  const ledgerUpload = activeAccountId === "dues_intake" ? duesLedgerUpload : primaryLedgerUpload;
-  const bankUpload = activeAccountId === "dues_intake" ? duesBankUpload : primaryBankUpload;
-  const evidenceUploads = activeAccountId === "dues_intake" ? duesEvidenceUploads : primaryEvidenceUploads;
-  const periodStart = activeAccountId === "dues_intake" ? duesPeriodStart : primaryPeriodStart;
-  const periodEnd = activeAccountId === "dues_intake" ? duesPeriodEnd : primaryPeriodEnd;
-  const openingBalance = activeAccountId === "dues_intake" ? duesOpeningBalance : primaryOpeningBalance;
-  const expectedClosingBalance = activeAccountId === "dues_intake" ? duesExpectedClosingBalance : primaryExpectedClosingBalance;
-  const snapshotPayload = {
-    organization_id: "aegis",
-    account_id: activeAccountId,
-    period: semester,
-    period_start: periodStart,
-    period_end: periodEnd,
-    transactions: activeTransactions,
-    evidence: activeEvidence,
-  };
-
-  const totalIncome = activeTransactions.reduce((sum, row) => sum + Number(row.income || 0), 0);
-  const totalExpense = activeTransactions.reduce((sum, row) => sum + Number(row.expense || 0), 0);
-  const computedClosing = openingBalance + totalIncome - totalExpense;
-  const selectedTransactionLabel = editingTransactionKey ? `수정 중: ${editingTransactionKey}` : "새 거래";
-  const primaryCaptureCount = primaryEvidence.filter((item) => item.kind === "account_capture").length;
-  const duesCaptureCount = duesEvidence.filter((item) => item.kind === "account_capture").length;
-  const primaryHistoryCount = primaryCaptureCount || Number(Boolean(primarySnapshot?.source?.bank_transactions?.length));
-  const duesHistoryCount = duesCaptureCount || Number(Boolean(duesSnapshot?.source?.bank_transactions?.length));
-  const packageReady = Boolean(primarySnapshot?.id && duesSnapshot?.id && primaryHistoryCount && duesHistoryCount);
-
-  function setPeriodStart(value: string) {
-    if (activeAccountId === "dues_intake") setDuesPeriodStart(value);
-    else setPrimaryPeriodStart(value);
-  }
-
-  function setPeriodEnd(value: string) {
-    if (activeAccountId === "dues_intake") setDuesPeriodEnd(value);
-    else setPrimaryPeriodEnd(value);
-  }
-
-  function setOpeningBalance(value: number) {
-    if (activeAccountId === "dues_intake") setDuesOpeningBalance(value);
-    else setPrimaryOpeningBalance(value);
-  }
-
-  function setExpectedClosingBalance(value: number) {
-    if (activeAccountId === "dues_intake") setDuesExpectedClosingBalance(value);
-    else setPrimaryExpectedClosingBalance(value);
-  }
-
-  function resetTransactionDraft(rows: TransactionInput[] = activeTransactions, accountId: AccountId = activeAccountId) {
-    const sorted = [...rows].sort((a, b) => a.number - b.number);
-    const last = sorted[sorted.length - 1];
-    const defaultDate = accountId === "dues_intake" ? duesPeriodStart : primaryPeriodStart;
-    const defaultBalance = accountId === "dues_intake" ? duesOpeningBalance : primaryOpeningBalance;
-    setEditingTransactionKey("");
-    setTransactionDraft({
-      number: Number(last?.number || 0) + 1,
-      date: defaultDate,
-      description: "",
-      income: 0,
-      expense: 0,
-      balance: Number(last?.balance ?? defaultBalance),
-      category: "미분류",
-      processing_method: "",
-      details: "",
-      note: "",
-      evidence_ids: [],
-      account_id: accountId,
-    });
-  }
-
-  function selectTransactionForEdit(row: TransactionInput) {
-    const accountId = (row.account_id === "dues_intake" ? "dues_intake" : "primary") as AccountId;
-    setLedgerAccountId(accountId);
-    setEditingTransactionKey(row.transaction_id || String(row.number));
-    setTransactionDraft({
-      ...row,
-      category: row.category || "미분류",
-      processing_method: row.processing_method || "",
-      details: row.details || "",
-      note: row.note || "",
-      evidence_ids: row.evidence_ids || [],
-    });
-  }
+function App() {
+  const route = routeFromPath();
+  const [username, setUsername] = useState(() => sessionStorage.getItem("atlas_username") || "aegis-admin");
+  const [role, setRole] = useState(() => sessionStorage.getItem("atlas_role") || "admin");
+  const [password, setPassword] = useState("");
+  const [token, setToken] = useState(() => sessionStorage.getItem("atlas_token") || "");
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
-    if (!authToken) return;
-    api<any>("/config/defaults", { headers: { "X-ATLAS-Token": authToken } }).then((result) => {
-      setGoogleSheetSource((current) => current || result.default_ledger_sheet_url || "");
-      setDuesSheetSource((current) => current || result.default_dues_ledger_sheet_url || "");
-    }).catch(() => undefined);
-    const params = new URLSearchParams(window.location.search);
-    const authorizationCode = params.get("code");
-    const oauthState = params.get("state");
-    if (!authorizationCode || !oauthState) {
-      api<any>("/auth/google/status", { headers: { "X-ATLAS-Token": authToken } }).then(setGoogleConnection).catch(() => undefined);
-      return;
-    }
-    const redirectUri = `${window.location.origin}${window.location.pathname}`;
-    setBusy("Google 계정 연결");
-    api<any>("/auth/google/connect", {
-      method: "POST",
-      headers: { "X-ATLAS-Token": authToken },
-      body: JSON.stringify({ authorization_code: authorizationCode, state: oauthState, redirect_uri: redirectUri }),
-    }).then((result) => {
-      setGoogleConnection(result);
-      setOutput(result);
-      window.history.replaceState({}, "", window.location.pathname);
-    }).catch((err) => setError(err instanceof Error ? err.message : "Google 계정 연결에 실패했습니다.")).finally(() => setBusy(""));
-  }, [authToken]);
+    if (!toast || toast.kind === "loading") return;
+    const timeout = window.setTimeout(() => setToast(null), 4500);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
 
-  async function request<T>(path: string, init?: RequestInit): Promise<T> {
-    return api<T>(path, { ...init, headers: { ...(authToken ? { "X-ATLAS-Token": authToken } : {}), ...(init?.headers ?? {}) } });
-  }
-
-  async function run<T>(label: string, action: () => Promise<T>): Promise<T | undefined> {
-    setBusy(label); setError("");
-    try { const result = await action(); setOutput(result); return result; }
-    catch (err) { setError(err instanceof Error ? err.message : "요청 처리 중 오류가 발생했습니다."); }
-    finally { setBusy(""); }
-  }
-
-  function jobIdOf(value: any): string {
-    return value?.id || value?.job_id || "";
-  }
-
-  function jobPackageIdOf(value: any, fallback?: string): string {
-    return value?.result?.package_id || value?.package_id || fallback || "";
-  }
-
-  async function waitForJob(jobId: string, packageId?: string): Promise<any> {
-    const startedAt = Date.now();
-    let attempt = 0;
-    while (Date.now() - startedAt < JOB_MAX_WAIT_MS) {
-      const current = await request<any>(`/jobs/${jobId}`);
-      setJob(current);
-      if (attempt % 5 === 0) setOutput(current);
-      if (current.status === "completed") {
-        const resolvedPackageId = jobPackageIdOf(current, packageId);
-        if (resolvedPackageId) {
-          const pkg = await request<any>(`/packages/${resolvedPackageId}`);
-          setPackageData(pkg);
-        }
-        setOutput(current);
-        return current;
-      }
-      if (current.status === "failed") throw new Error(current.error || "문서 생성 작업이 실패했습니다.");
-      attempt += 1;
-      const elapsed = Date.now() - startedAt;
-      const interval = elapsed < 120_000 ? 1000 : elapsed < 600_000 ? 2000 : 5000;
-      await new Promise((resolve) => window.setTimeout(resolve, interval));
-    }
-    throw new Error("문서 생성이 30분 이상 진행 중입니다. 작업 이력을 확인하거나 서버 로그를 확인해주세요.");
-  }
-
-  async function refreshCurrentJob() {
-    const currentJobId = jobIdOf(job);
-    if (!currentJobId) return;
-    const current: any = await run("작업 상태 확인", () => request(`/jobs/${currentJobId}`));
-    if (!current) return;
-    setJob(current);
-    const resolvedPackageId = jobPackageIdOf(current, packageData?.id);
-    if (current.status === "completed" && resolvedPackageId) {
-      const pkg = await request<any>(`/packages/${resolvedPackageId}`);
-      setPackageData(pkg);
-      setOutput({ job: current, package: pkg });
-    }
-  }
-
-  async function uploadForm(path: string, form: FormData): Promise<any> {
-    const response = await fetch(`${API_BASE}${path}`, {
-      method: "POST",
-      headers: { "X-ATLAS-Token": authToken },
-      body: form,
-    });
-    if (!response.ok) throw await parseApiError(response);
-    return response.json();
-  }
-
-  async function saveTransactionDraft() {
-    if (!transactionDraft.date || !transactionDraft.description.trim()) {
-      setError("거래 날짜와 내용을 입력해주세요.");
-      return;
-    }
-    const normalizedDraft: TransactionInput = {
-      ...transactionDraft,
-      number: Number(transactionDraft.number),
-      income: Number(transactionDraft.income || 0),
-      expense: Number(transactionDraft.expense || 0),
-      balance: Number(transactionDraft.balance || 0),
-      category: transactionDraft.category || "미분류",
-      processing_method: transactionDraft.processing_method || "",
-      details: transactionDraft.details || "",
-      note: transactionDraft.note || "",
-      evidence_ids: transactionDraft.evidence_ids || [],
-      account_id: transactionDraft.account_id || activeAccountId,
-    };
-    const acctId = normalizedDraft.account_id || "primary";
-    const acctSnapshot = acctId === "dues_intake" ? duesSnapshot : primarySnapshot;
-    if (acctSnapshot?.id) {
-      const result: any = await run(editingTransactionKey ? "거래 수정 스냅샷 생성" : "거래 추가 스냅샷 생성", () => request(
-        editingTransactionKey ? `/ledger-snapshots/${acctSnapshot.id}/transactions/${encodeURIComponent(editingTransactionKey)}` : `/ledger-snapshots/${acctSnapshot.id}/transactions`,
-        {
-          method: editingTransactionKey ? "PUT" : "POST",
-          body: JSON.stringify(normalizedDraft),
-        },
-      ));
-      if (!result) return;
-      setAccountSnapshot(acctId, result);
-      setAccountTransactions(acctId, result.transactions);
-      setAccountEvidence(acctId, result.evidence);
-      resetTransactionDraft(result.transactions, acctId as AccountId);
-      return;
-    }
-    const currentTxn = acctId === "dues_intake" ? duesTransactions : primaryTransactions;
-    const exists = currentTxn.some((item) => item.number === normalizedDraft.number);
-    if (!editingTransactionKey && exists) {
-      setError("이미 같은 번호의 거래가 있습니다.");
-      return;
-    }
-    const next = editingTransactionKey
-      ? currentTxn.map((item) => (item.transaction_id === editingTransactionKey || String(item.number) === editingTransactionKey ? normalizedDraft : item))
-      : [...currentTxn, normalizedDraft];
-    setAccountTransactions(acctId, next);
-    resetTransactionDraft(next, acctId as AccountId);
-  }
-
-  async function deleteTransaction(row: TransactionInput) {
-    const key = row.transaction_id || String(row.number);
-    const acctId = row.account_id || "primary";
-    const acctSnapshot = acctId === "dues_intake" ? duesSnapshot : primarySnapshot;
-    if (acctSnapshot?.id) {
-      const result: any = await run("거래 삭제 스냅샷 생성", () => request(`/ledger-snapshots/${acctSnapshot.id}/transactions/${encodeURIComponent(key)}`, { method: "DELETE" }));
-      if (!result) return;
-      setAccountSnapshot(acctId, result);
-      setAccountTransactions(acctId, result.transactions);
-      setAccountEvidence(acctId, result.evidence);
-      resetTransactionDraft(result.transactions, acctId as AccountId);
-      return;
-    }
-    const currentTxn = acctId === "dues_intake" ? duesTransactions : primaryTransactions;
-    const next = currentTxn.filter((item) => item.transaction_id !== key && String(item.number) !== key);
-    setAccountTransactions(acctId, next);
-    resetTransactionDraft(next, acctId as AccountId);
-  }
-
-  useEffect(() => {
-    if (ledgerAccountId === "dues_intake" && activeTab === "public") {
-      setActiveTab("ledger");
-    }
-  }, [ledgerAccountId, activeTab]);
-
-  async function uploadWorkbook(file: File, kind: "ledger" | "bank") {
-    const targetAccountId = ledgerAccountId;
-    const result = await run(kind === "ledger" ? "Aegis 장부 분석" : "토스 거래내역 분석", async () => {
-      const form = new FormData();
-      form.append("file", file);
-      return uploadForm("/imports/upload", form);
-    });
-    if (result) {
-      if (targetAccountId === "dues_intake") {
-        if (kind === "ledger") setDuesLedgerUpload(result);
-        else setDuesBankUpload(result);
-      } else if (kind === "ledger") {
-        setPrimaryLedgerUpload(result);
-      } else {
-        setPrimaryBankUpload(result);
-      }
-    }
-  }
-
-  async function beginGoogleConnect() {
-    const redirectUri = `${window.location.origin}${window.location.pathname}`;
-    const result: any = await run("Google 연결 준비", () => request(`/auth/google/authorize-url?redirect_uri=${encodeURIComponent(redirectUri)}`));
-    if (result?.authorization_url) window.location.assign(result.authorization_url);
-  }
-
-  async function disconnectGoogle() {
-    const result = await run("Google 연결 해제", () => request("/auth/google/disconnect", { method: "POST" }));
-    if (result) setGoogleConnection(result);
-  }
-
-  function storeEvidenceUploads(result: any[]) {
-    const primaryAdded = result.filter((item: any) => item.account_id !== "dues_intake");
-    const duesAdded = result.filter((item: any) => item.account_id === "dues_intake");
-    if (primaryAdded.length) {
-      setPrimaryEvidenceUploads((current) => [...current, ...primaryAdded]);
-      setPrimaryEvidence((current) => [
-        ...current.filter((item) => !primaryAdded.some((added: any) => added.id === item.id)),
-        ...primaryAdded,
-      ]);
-    }
-    if (duesAdded.length) {
-      setDuesEvidenceUploads((current) => [...current, ...duesAdded]);
-      setDuesEvidence((current) => [
-        ...current.filter((item) => !duesAdded.some((added: any) => added.id === item.id)),
-        ...duesAdded,
-      ]);
-    }
-  }
-
-  async function uploadEvidenceFiles(
-    files: FileList,
-    kindOverride?: string,
-    accountOverride: AccountId | undefined = kindOverride ? undefined : ledgerAccountId,
-  ): Promise<any[]> {
-    const result = await run("증빙자료 업로드", async () => {
-      const uploaded: any[] = [];
-      for (const file of Array.from(files)) {
-        const form = new FormData();
-        form.append("file", file);
-        form.append("kind", kindOverride || evidenceKind);
-        if (accountOverride) form.append("account_id", accountOverride);
-        if (evidenceTransactionNumber) form.append("transaction_number", evidenceTransactionNumber);
-        uploaded.push(await uploadForm("/evidence/upload", form));
-      }
-      return uploaded;
-    });
-    if (result) {
-      storeEvidenceUploads(result);
-      const targetSnapshot = accountOverride === "dues_intake" ? duesSnapshot : primarySnapshot;
-      if (accountOverride && targetSnapshot?.id && result.length) {
-        const revision: any = await run("선택 계좌에 증빙 자동 반영", () => request(`/ledger-snapshots/${targetSnapshot.id}/evidence`, {
-          method: "POST",
-          body: JSON.stringify({ evidence_ids: result.map((item: any) => item.id) }),
-        }));
-        if (revision) {
-          setAccountSnapshot(accountOverride, revision);
-          setAccountTransactions(accountOverride, revision.transactions || []);
-          setAccountEvidence(accountOverride, revision.evidence || []);
-        }
-      }
-    }
-    return result || [];
-  }
-
-  async function attachEvidenceToBothSnapshots(rows?: any[]) {
-    const candidates = rows || [...primaryEvidenceUploads, ...duesEvidenceUploads];
-    const targets = [
-      { accountId: "primary" as AccountId, snapshot: primarySnapshot, ids: candidates.filter((item) => item.account_id !== "dues_intake").map((item) => item.id) },
-      { accountId: "dues_intake" as AccountId, snapshot: duesSnapshot, ids: candidates.filter((item) => item.account_id === "dues_intake").map((item) => item.id) },
-    ].filter((target) => target.snapshot?.id && target.ids.length);
-    if (!targets.length) return;
-    const result = await run("두 계좌 증빙 반영", async () => {
-      const revisions: any[] = [];
-      for (const target of targets) {
-        revisions.push(await request(`/ledger-snapshots/${target.snapshot.id}/evidence`, {
-          method: "POST",
-          body: JSON.stringify({ evidence_ids: target.ids }),
-        }));
-      }
-      return revisions;
-    });
-    for (const revision of result || []) {
-      setAccountSnapshot(revision.account_id, revision);
-      setAccountTransactions(revision.account_id, revision.transactions || []);
-      setAccountEvidence(revision.account_id, revision.evidence || []);
-    }
-  }
-
-  async function uploadPackageEvidence(files: FileList) {
-    const uploaded = await uploadEvidenceFiles(files, "auto");
-    if (uploaded.length && primarySnapshot?.id && duesSnapshot?.id) await attachEvidenceToBothSnapshots(uploaded);
-  }
-
-  async function importWorkbooks() {
-    if (!ledgerUpload) return;
-    const targetAccountId = ledgerAccountId;
-    const result: any = await run("실제 장부 스냅샷 생성", () => request("/imports/workbook-snapshot", {
-      method: "POST",
-      body: JSON.stringify({
-        ledger_upload_id: ledgerUpload.id,
-        bank_upload_id: bankUpload?.id || null,
-        evidence_ids: evidenceUploads.map((item) => item.id),
-        account_id: targetAccountId,
-        period: semester,
-        period_start: periodStart || null,
-        period_end: periodEnd || null,
-        opening_balance: Number(openingBalance || 0),
-      }),
-    }));
-    if (!result) return;
-    setAccountSnapshot(targetAccountId, result);
-    setAccountTransactions(targetAccountId, result.transactions);
-    setAccountEvidence(targetAccountId, result.evidence);
-    if (targetAccountId === "dues_intake") {
-      setDuesOpeningBalance(Number(result.ledger?.opening_balance || 0));
-      setDuesExpectedClosingBalance(Number(result.ledger?.closing_balance || 0));
-      if (result.ledger?.period_start) setDuesPeriodStart(result.ledger.period_start);
-      if (result.ledger?.period_end) setDuesPeriodEnd(result.ledger.period_end);
-    } else {
-      setPrimaryOpeningBalance(Number(result.ledger?.opening_balance || 0));
-      setPrimaryExpectedClosingBalance(Number(result.ledger?.closing_balance || 0));
-      if (result.ledger?.period_start) setPrimaryPeriodStart(result.ledger.period_start);
-      if (result.ledger?.period_end) setPrimaryPeriodEnd(result.ledger.period_end);
-    }
-    resetTransactionDraft(result.transactions || [], targetAccountId);
-  }
-
-  async function importGoogleSheet() {
-    if (!googleSheetSource.trim()) {
-      setError(`${ACCOUNT_LABELS.primary} Google 장부 URL 또는 ID를 입력해주세요.`);
-      return;
-    }
-    const result: any = await run(`${ACCOUNT_LABELS.primary} Google 장부 스냅샷 생성`, () => request("/google/sheets/snapshot", {
-      method: "POST",
-      body: JSON.stringify({
-        spreadsheet_url_or_id: googleSheetSource.trim(),
-        range: googleSheetRange.trim() || "B:I",
-        period: semester,
-        period_start: primaryPeriodStart || null,
-        period_end: primaryPeriodEnd || null,
-        opening_balance: Number(primaryOpeningBalance || 0),
-        organization_id: "aegis",
-        account_id: "primary",
-      }),
-    }));
-    if (!result) return;
-    setAccountSnapshot("primary", result);
-    setAccountTransactions("primary", result.transactions || []);
-    setAccountEvidence("primary", result.evidence || []);
-    const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
-    const last = sortedTransactions[sortedTransactions.length - 1];
-    if (last?.balance !== undefined) setPrimaryExpectedClosingBalance(Number(last.balance));
-    setLedgerAccountId("primary");
-    setAccountFilter("primary");
-    resetTransactionDraft(result.transactions || [], "primary");
-  }
-
-  async function importGoogleDuesSheet() {
-    if (!duesSheetSource.trim()) {
-      setError(`${ACCOUNT_LABELS.dues_intake} Google 장부 URL 또는 ID를 입력해주세요.`);
-      return;
-    }
-    const result: any = await run(`${ACCOUNT_LABELS.dues_intake} Google 장부 스냅샷 생성`, () => request("/google/sheets/snapshot", {
-      method: "POST",
-      body: JSON.stringify({
-        spreadsheet_url_or_id: duesSheetSource.trim(),
-        range: googleSheetRange.trim() || "B:I",
-        period: semester,
-        period_start: duesPeriodStart || null,
-        period_end: duesPeriodEnd || null,
-        opening_balance: Number(duesOpeningBalance || 0),
-        organization_id: "aegis",
-        account_id: "dues_intake",
-      }),
-    }));
-    if (!result) return;
-    setAccountSnapshot("dues_intake", result);
-    setAccountTransactions("dues_intake", result.transactions || []);
-    setAccountEvidence("dues_intake", result.evidence || []);
-    const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
-    const last = sortedTransactions[sortedTransactions.length - 1];
-    if (last?.balance !== undefined) setDuesExpectedClosingBalance(Number(last.balance));
-    setLedgerAccountId("dues_intake");
-    setAccountFilter("dues_intake");
-    resetTransactionDraft(result.transactions || [], "dues_intake");
-  }
-
-  async function attachEvidenceToSnapshot() {
-    const targetAccountId = activeAccountId;
-    const targetSnapshot = targetAccountId === "dues_intake" ? duesSnapshot : primarySnapshot;
-    const targetEvidenceUploads = targetAccountId === "dues_intake" ? duesEvidenceUploads : primaryEvidenceUploads;
-    if (!targetSnapshot?.id || !targetEvidenceUploads.length) return;
-    const result: any = await run("증빙 반영 스냅샷 생성", () => request(`/ledger-snapshots/${targetSnapshot.id}/evidence`, {
-      method: "POST",
-      body: JSON.stringify({ evidence_ids: targetEvidenceUploads.map((item) => item.id) }),
-    }));
-    if (!result) return;
-    setAccountSnapshot(targetAccountId, result);
-    setAccountTransactions(targetAccountId, result.transactions);
-    setAccountEvidence(targetAccountId, result.evidence);
-  }
-
-  async function downloadPackage() {
-    if (!packageData?.id || !authToken) return;
-    setBusy("제출 ZIP 다운로드"); setError("");
+  const run = useCallback<Runner>(async (label, action) => {
+    setToast({ kind: "loading", title: label });
     try {
-      const response = await fetch(`${API_BASE}/packages/${packageData.id}/download`, { headers: { "X-ATLAS-Token": authToken } });
-      if (!response.ok) throw await parseApiError(response);
-      const blobUrl = URL.createObjectURL(await response.blob());
-      const anchor = document.createElement("a"); anchor.href = blobUrl; anchor.download = `${clubName}_${semester}_동연제출.zip`; anchor.click(); URL.revokeObjectURL(blobUrl);
-    } catch (err) { setError(err instanceof Error ? err.message : "ZIP 다운로드 중 오류가 발생했습니다."); }
-    finally { setBusy(""); }
-  }
-
-  async function createPackageJob() {
-    if (!packageReady) {
-      setError("두 계좌 장부와 계좌 전체내역 자료를 모두 준비해주세요.");
-      return;
+      const result = await action();
+      setToast({ kind: "success", title: `${label} 완료` });
+      return result;
+    } catch (error) {
+      setToast({ kind: "error", title: `${label} 실패`, detail: error instanceof Error ? error.message : "요청을 처리하지 못했습니다." });
+      return undefined;
     }
-    await run("패키지 생성", async () => {
-      const created: any = await request("/packages/submission", {
-        method: "POST",
-        body: JSON.stringify({
-          club_name: clubName,
-          organization_id: "aegis",
-          account_id: "primary",
-          semester,
-          primary_snapshot_id: primarySnapshot.id,
-          dues_snapshot_id: duesSnapshot.id,
-          treasurer_name: treasurerName,
-          president_name: presidentName,
-          reviewer_name: reviewerName,
-          opening_balance: primaryOpeningBalance,
-          expected_closing_balance: primaryExpectedClosingBalance,
-          primary_opening_balance: primaryOpeningBalance,
-          primary_expected_closing_balance: primaryExpectedClosingBalance,
-          dues_opening_balance: duesOpeningBalance,
-          dues_expected_closing_balance: duesExpectedClosingBalance,
-          row_capacity: 40,
-        }),
-      });
-      setJob(created);
-      const finished = await waitForJob(created.job_id, created.package_id);
-      const pkg = await request<any>(`/packages/${created.package_id}`);
-      setPackageData(pkg);
-      return finished;
-    });
+  }, []);
+
+  async function login() {
+    const session = await run("로그인", () => api<any>("/auth/login", undefined, { method: "POST", body: JSON.stringify({ username, role, password: password || null }) }));
+    if (!session?.token) return;
+    sessionStorage.setItem("atlas_token", session.token);
+    sessionStorage.setItem("atlas_username", session.username);
+    sessionStorage.setItem("atlas_role", session.role);
+    setToken(session.token); setUsername(session.username); setRole(session.role);
   }
 
-  const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode; hideForDues?: boolean }> = [
-    { id: "package", label: "동연 패키지", icon: <FileArchive size={17} /> },
-    { id: "ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
-    { id: "public", label: "월간 공개", icon: <Link2 size={17} />, hideForDues: true },
-    { id: "discord", label: "Discord", icon: <Send size={17} /> },
-    { id: "history", label: "감사 로그", icon: <History size={17} /> },
+  const tabs: Array<{ id: RouteId; href: string; label: string; icon: React.ReactNode }> = [
+    { id: "package", href: "/package", label: "동연 패키지", icon: <FileArchive size={17} /> },
+    { id: "ledger", href: "/ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
+    { id: "public-report", href: "/public-report", label: "월간 공개", icon: <Link2 size={17} /> },
+    { id: "monthly", href: "/monthly", label: "월별 내역 전송", icon: <Send size={17} /> },
   ];
 
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><div className="brand-mark">A</div><div><p>ATLAS</p><h1>Aegis 회계 자동화</h1></div></div>
-        <div className="session-state"><span className={`dot ${authToken ? "online" : ""}`} />{authToken ? `${username} · ${role}` : "로그인 필요"}</div>
-      </header>
-
-      {!authToken ? (
-        <section className="login-surface">
-          <div><p className="eyebrow">ACCOUNTING OPERATIONS</p><h2>회계 작업을 시작합니다</h2><p>배포 환경에서는 서버의 로그인 비밀번호가 적용됩니다.</p></div>
-          <div className="login-form">
-            <label>사용자<input value={username} onChange={(event) => setUsername(event.target.value)} /></label>
-            <label>역할<select value={role} onChange={(event) => setRole(event.target.value)}><option value="admin">관리자</option><option value="accountant">회계담당자</option><option value="president">회장</option><option value="reviewer">검토자</option></select></label>
-            <label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="로컬 데모는 비워둠" /></label>
-            <button onClick={async () => { const session: any = await run("로그인", () => api("/auth/login", { method: "POST", body: JSON.stringify({ username, role, password: password || null }) })); if (session?.token) { window.sessionStorage.setItem("atlas_token", session.token); window.sessionStorage.setItem("atlas_username", session.username); window.sessionStorage.setItem("atlas_role", session.role); setAuthToken(session.token); setUsername(session.username); setRole(session.role); } }}><LockKeyhole size={17} /> 로그인</button>
-          </div>
-          {error && <pre className="error-box">{error}</pre>}
-        </section>
-      ) : (
-        <>
-          <nav className="tabs" aria-label="ATLAS 메뉴">{tabs.filter((tab) => !tab.hideForDues || ledgerAccountId !== "dues_intake").map((tab) => <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>{tab.icon}{tab.label}</button>)}</nav>
-
-          <section className="metric-grid">
-            {activeTab === "package" ? <>
-              <Metric label={`${ACCOUNT_LABELS.primary} 거래`} value={`${primaryTransactions.length}건`} />
-              <Metric label={`${ACCOUNT_LABELS.dues_intake} 거래`} value={`${duesTransactions.length}건`} />
-              <Metric label="연결된 증빙" value={`${primaryEvidence.length + duesEvidence.length}개`} />
-              <Metric label="계좌 전체내역" value={`${Number(primaryHistoryCount > 0) + Number(duesHistoryCount > 0)}/2 계좌`} />
-            </> : <>
-              <Metric label="수입총액" value={money(totalIncome)} /><Metric label="지출총액" value={money(totalExpense)} /><Metric label="계산잔액" value={money(computedClosing)} /><Metric label="기대잔액" value={money(expectedClosingBalance)} />
-            </>}
-          </section>
-
-          {activeTab === "ledger" && <>
-            <section className="section-head"><div><p className="eyebrow">LEDGER SOURCE</p><h2>장부 스냅샷</h2><p>제출과 공개 자료는 생성 시점의 해시가 고정된 스냅샷을 사용합니다.</p></div>{snapshot && <StatusBadge value="SNAPSHOT SAVED" />}</section>
-            <section className="workspace-grid">
-              <div className="panel"><h3>회계 기본 정보</h3><div className="form-grid"><label>동아리명<input value={clubName} onChange={(e) => setClubName(e.target.value)} /></label><label>회계 기간<input value={semester} onChange={(e) => setSemester(e.target.value)} /></label><label>시작일<input type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} /></label><label>종료일<input type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} /></label><label>이전 잔액<input type="number" value={openingBalance} onChange={(e) => setOpeningBalance(Number(e.target.value))} /></label><label>최종 잔액<input type="number" value={expectedClosingBalance} onChange={(e) => setExpectedClosingBalance(Number(e.target.value))} /></label></div></div>
-              <div className="panel">
-                <div className="panel-heading"><h3>Google 자료 연결</h3>{googleConnection && <StatusBadge value={googleConnection.connected ? "CONNECTED" : "DISCONNECTED"} />}</div>
-                <p className="muted">{googleConnection?.connected ? `${googleConnection.account_email} · 읽기 전용 연결` : "운영 계정의 Sheets 장부와 Drive 증빙을 읽기 전용으로 연결합니다."}</p>
-                <div className="form-grid single google-import-form">
-                  <label>{ACCOUNT_LABELS.primary} 장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
-                  <label>{ACCOUNT_LABELS.dues_intake} 장부 URL 또는 ID<input value={duesSheetSource} onChange={(event) => setDuesSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
-                  <label>가져올 범위<input value={googleSheetRange} onChange={(event) => setGoogleSheetRange(event.target.value)} placeholder="B:I 또는 시트명!B:I" /></label>
-                </div>
-                <div className="button-row">
-                  {googleConnection?.connected ? <button className="secondary danger" onClick={disconnectGoogle}>연결 해제</button> : <button onClick={beginGoogleConnect}>Google 계정 연결</button>}
-                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleSheet}><FileSpreadsheet size={17} /> {ACCOUNT_LABELS.primary} 가져오기</button>
-                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleDuesSheet}><FileSpreadsheet size={17} /> {ACCOUNT_LABELS.dues_intake} 가져오기</button>
-                  <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Google 진단", () => request("/google/diagnostics"))}>Google 진단</button>
-                  <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Sheets 조회", () => request("/google/sheets"))}>Google Sheets</button>
-                  <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Drive 조회", () => request("/google/drive/files"))}>Google Drive</button>
-                </div>
-              </div>
-            </section>
-            <details className="advanced-editor import-details">
-              <summary>파일 기반 장부 가져오기 (보조)</summary>
-              <section className="import-surface">
-              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => { const accountId = event.target.value as AccountId; setLedgerAccountId(accountId); resetTransactionDraft(accountId === "dues_intake" ? duesTransactions : primaryTransactions, accountId); }}><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
-              <div className="upload-grid">
-                <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
-                <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 / IBK 거래내역</span><small>{bankUpload?.filename || ".xlsx / .pdf"}</small><input type="file" accept=".xlsx,.xlsm,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
-                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="수동 번호 (파일명 없을 때)" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : `#장부ID# → ${ACCOUNT_LABELS.primary} · *장부ID* → ${ACCOUNT_LABELS.dues_intake} 자동 매칭`}</small></div>
-              </div>
-              {snapshot?.source?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.source.reconciliation.balance_delta)}</strong><span>장부 {snapshot.source.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.source.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.source.reconciliation.matched_ledger_count}건</span></div>}
-              <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>
-              </section>
-            </details>
-            <section className="ledger-crud">
-              <div className="panel transaction-form-panel">
-                <div className="panel-heading"><h3>장부 거래 편집</h3><StatusBadge value={selectedTransactionLabel} /></div>
-                <div className="form-grid ledger-form-grid">
-                  <label>번호<input type="number" min="1" value={transactionDraft.number} onChange={(event) => setTransactionDraft({ ...transactionDraft, number: Number(event.target.value) })} /></label>
-                  <label>날짜<input type="date" value={transactionDraft.date} onChange={(event) => setTransactionDraft({ ...transactionDraft, date: event.target.value })} /></label>
-                  <label className="wide-field">내용<input value={transactionDraft.description} onChange={(event) => setTransactionDraft({ ...transactionDraft, description: event.target.value })} /></label>
-                  <label>분류<input value={transactionDraft.category || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, category: event.target.value })} /></label>
-                  <label>수입<input type="number" value={transactionDraft.income} onChange={(event) => setTransactionDraft({ ...transactionDraft, income: Number(event.target.value) })} /></label>
-                  <label>지출<input type="number" value={transactionDraft.expense} onChange={(event) => setTransactionDraft({ ...transactionDraft, expense: Number(event.target.value) })} /></label>
-                  <label>잔액<input type="number" value={transactionDraft.balance} onChange={(event) => setTransactionDraft({ ...transactionDraft, balance: Number(event.target.value) })} /></label>
-                  <label>처리방식<select value={transactionDraft.processing_method || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, processing_method: event.target.value })}><option value="">선택 안 함</option><option value="계좌이체">계좌이체</option><option value="카드결제">카드결제</option><option value="카드결제취소">카드결제취소</option><option value="이자입금">이자입금</option><option value="이자입금취소">이자입금취소</option></select></label>
-                  <label className="wide-field">상세정보<input value={transactionDraft.details || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, details: event.target.value })} /></label>
-                  <label className="wide-field">내부 비고<input value={transactionDraft.note || ""} onChange={(event) => setTransactionDraft({ ...transactionDraft, note: event.target.value })} /></label>
-                </div>
-                <div className="button-row"><button onClick={saveTransactionDraft} disabled={!!busy}><Save size={17} /> {editingTransactionKey ? "수정 저장" : "거래 추가"}</button><button className="secondary" onClick={() => resetTransactionDraft()} disabled={!!busy}>초기화</button></div>
-              </div>
-              <div className="table-wrap ledger-table-wrap">
-                <div className="table-header-row">
-                  <h3>거래 목록</h3>
-                  <select aria-label="계좌 필터" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as "primary" | "dues_intake" | "all")}>
-                    <option value="all">전체 계좌</option>
-                    <option value="primary">{ACCOUNT_LABELS.primary}</option>
-                    <option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option>
-                  </select>
-                </div>
-                <table>
-                  <thead><tr><th>번호</th><th>날짜</th><th>계좌</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>처리방식</th><th>상세정보</th><th>증빙</th><th></th></tr></thead>
-                  <tbody>{transactions.filter((row) => accountFilter === "all" || (row.account_id || "primary") === accountFilter).map((row) => <tr key={`${row.account_id || "primary"}:${row.transaction_id || row.number}`}><td>{row.number}</td><td>{row.date}</td><td><span className={`account-tag ${(row.account_id || "primary") === "dues_intake" ? "dues" : "primary"}`}>{(row.account_id || "primary") === "dues_intake" ? "회비" : "운영"}</span></td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
-                </table>
-              </div>
-            </section>
-            <details className="advanced-editor"><summary>고급 데이터 보기</summary><section className="editor-grid"><label className="editor-block">{ACCOUNT_LABELS.primary} 거래 데이터<textarea readOnly value={JSON.stringify(primaryTransactions, null, 2)} /></label><label className="editor-block">{ACCOUNT_LABELS.dues_intake} 거래 데이터<textarea readOnly value={JSON.stringify(duesTransactions, null, 2)} /></label></section></details>
-          </>}
-
-          {activeTab === "package" && <>
-            <section className="section-head"><div><p className="eyebrow">SUBMISSION PACKAGE</p><h2>동아리연합회 제출 패키지</h2><p>두 계좌 장부와 증빙을 하나의 제출본으로 조립합니다.</p></div>{packageData ? <StatusBadge value={packageData.status} /> : <StatusBadge value={packageReady ? "READY" : "PREPARING"} />}</section>
-
-            <section className="package-readiness" aria-label="계좌별 준비 상태">
-              <article className={primarySnapshot?.id && primaryHistoryCount ? "ready" : ""}>
-                <div className="readiness-heading"><div><span className="account-tag primary">운영</span><h3>{ACCOUNT_LABELS.primary}</h3></div><StatusBadge value={primarySnapshot?.id && primaryHistoryCount ? "READY" : "REQUIRED"} /></div>
-                <dl><div><dt>장부</dt><dd>{primarySnapshot?.id ? `${primaryTransactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{primaryEvidence.filter((item) => item.kind !== "account_capture").length}개</dd></div><div><dt>계좌 전체내역</dt><dd>{primaryHistoryCount ? `${primaryHistoryCount}개` : "필요"}</dd></div></dl>
-              </article>
-              <article className={duesSnapshot?.id && duesHistoryCount ? "ready" : ""}>
-                <div className="readiness-heading"><div><span className="account-tag dues">회비</span><h3>{ACCOUNT_LABELS.dues_intake}</h3></div><StatusBadge value={duesSnapshot?.id && duesHistoryCount ? "READY" : "REQUIRED"} /></div>
-                <dl><div><dt>장부</dt><dd>{duesSnapshot?.id ? `${duesTransactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{duesEvidence.filter((item) => item.kind !== "account_capture").length}개</dd></div><div><dt>계좌 전체내역</dt><dd>{duesHistoryCount ? `${duesHistoryCount}개` : "필요"}</dd></div></dl>
-              </article>
-            </section>
-
-            <section className="package-upload-band">
-              <div><ReceiptText size={22} /><div><h3>영수증·소명·계좌 전체내역 일괄 등록</h3><p><strong>#장부ID#</strong>는 {ACCOUNT_LABELS.primary}, <strong>*장부ID*</strong>는 {ACCOUNT_LABELS.dues_intake}로 연결됩니다. 파일명에 토스뱅크·IBK기업은행·거래내역이 있으면 계좌 전체내역으로 분류합니다.</p></div></div>
-              <label className="file-button"><Upload size={17} /> 파일 일괄 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={async (event) => { if (event.target.files?.length) await uploadPackageEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
-              <button className="secondary" disabled={(!primaryEvidenceUploads.length && !duesEvidenceUploads.length) || !primarySnapshot?.id || !duesSnapshot?.id || !!busy} onClick={() => attachEvidenceToBothSnapshots()}><RefreshCw size={17} /> 대기 자료 다시 반영</button>
-            </section>
-
-            <section className="deliverables-panel">
-              <div className="deliverables-heading"><div><p className="eyebrow">PACKAGE CONTENTS</p><h3>생성되는 제출 파일</h3></div><strong>필수 문서 4개</strong></div>
-              <div className="deliverable-list">
-                <div><FileSpreadsheet size={20} /><span><strong>동아리 수입지출관리대장.xlsx</strong><small>공식 원본 양식 · {ACCOUNT_LABELS.primary}/{ACCOUNT_LABELS.dues_intake} 2개 시트</small></span><b>1개</b></div>
-                <div><Landmark size={20} /><span><strong>동아리 계좌 전체내역.docx</strong><small>토스뱅크와 기업은행 전체내역 일괄 포함</small></span><b>1개</b></div>
-                <div><ReceiptText size={20} /><span><strong>영수증 및 소명자료</strong><small>{ACCOUNT_LABELS.primary} 1개 · {ACCOUNT_LABELS.dues_intake} 1개로 완전 분리</small></span><b>2개</b></div>
-                <div><Archive size={20} /><span><strong>원본자료·검증 리포트·manifest</strong><small>계좌별 원본 폴더와 무결성 정보 포함</small></span><b>포함</b></div>
-              </div>
-            </section>
-
-            <section className="workspace-grid package-controls"><div className="panel"><h3>제출 정보</h3><div className="form-grid"><label>동아리명<input value={clubName} onChange={(e) => setClubName(e.target.value)} /></label><label>회계 기간<input value={semester} onChange={(e) => setSemester(e.target.value)} /></label><label>회계담당자<input value={treasurerName} onChange={(e) => setTreasurerName(e.target.value)} /></label><label>회장<input value={presidentName} onChange={(e) => setPresidentName(e.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(e) => setReviewerName(e.target.value)} /></label></div></div><div className="panel"><h3>현재 작업</h3>{job ? <div className="job-state"><RefreshCw className={job.status === "running" ? "spin" : ""} size={20} /><div><strong>{job.status}</strong><span>{jobIdOf(job)}</span></div></div> : <p className="muted">두 계좌 준비가 끝나면 패키지를 생성할 수 있습니다.</p>}{packageData?.validation && <div className="validation-line"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div>}{packageData?.document_coverage && <div className="coverage-grid"><span>운영 장부 <strong>{packageData.document_coverage.ledger?.accounts?.primary?.transaction_rows ?? 0}건</strong></span><span>회비 장부 <strong>{packageData.document_coverage.ledger?.accounts?.dues_intake?.transaction_rows ?? 0}건</strong></span><span>운영 증빙 <strong>{packageData.document_coverage.evidence_documents?.primary?.embedded_files ?? 0}개</strong></span><span>회비 증빙 <strong>{packageData.document_coverage.evidence_documents?.dues_intake?.embedded_files ?? 0}개</strong></span><span>계좌내역 <strong>{packageData.document_coverage.account_document?.embedded_capture_pages ?? 0}쪽</strong></span><span>원본 <strong>{(packageData.document_coverage.copied_evidence_files ?? 0) + (packageData.document_coverage.copied_source_files ?? 0)}개</strong></span></div>}</div></section>
-            <div className="action-bar package-actions"><button disabled={!packageReady || !!busy} onClick={createPackageJob}><FileArchive size={17} /> 통합 패키지 생성</button><button className="secondary" disabled={!jobIdOf(job) || !!busy} onClick={refreshCurrentJob}><RefreshCw size={17} /> 상태 확인</button><button className="secondary" disabled={packageData?.status !== "draft" || !!busy} onClick={async () => { const result = await run("검토 요청", () => request(`/packages/${packageData.id}/submit-review`, { method: "POST" })); if (result) setPackageData(result); }}>검토 요청</button><button className="approve" disabled={packageData?.status !== "pending_review" || !!busy} onClick={async () => { const result = await run("패키지 승인", () => request(`/packages/${packageData.id}/approve`, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button><button className="secondary" disabled={!packageData?.zip_path} onClick={downloadPackage}><Download size={17} /> ZIP 다운로드</button><button className="secondary" onClick={() => setActiveTab("ledger")}><BookOpenCheck size={17} /> 장부·증빙 관리</button></div>
-            {packageData?.zip_sha256 && <section className="integrity"><ShieldCheck size={20} /><div><strong>ZIP 무결성</strong><code>{packageData.zip_sha256}</code></div></section>}
-          </>}
-
-          {activeTab === "public" && <>
-            <section className="section-head"><div><p className="eyebrow">MEMBER DISCLOSURE</p><h2>월간 회원 공개</h2><p>긴 난수 토큰을 사용하며 링크를 즉시 폐기하거나 재발급할 수 있습니다.</p></div>{report && <StatusBadge value={report.status || "active"} />}</section>
-            <section className="workspace-grid"><div className="panel"><h3>공개 설정</h3><div className="form-grid"><label>공개 월<input value={month} onChange={(e) => setMonth(e.target.value)} /></label><label>만료일<input type="datetime-local" id="report-expiry" /></label></div></div><div className="panel"><h3>공개 범위</h3><ul className="privacy-list"><li>거래 상대방 및 계좌번호 제외</li><li>증빙 ID·원본 경로 제외</li><li>내부 비고 기본 비공개</li><li>검색엔진 색인 차단</li></ul></div></section>
-            <div className="action-bar"><button disabled={!!busy} onClick={async () => { const expiry = (document.getElementById("report-expiry") as HTMLInputElement)?.value; const result: any = await run("월간 공개 생성", () => request("/monthly-reports", { method: "POST", body: JSON.stringify({ club_name: clubName, month, snapshot_id: primarySnapshot?.id, opening_balance: primaryOpeningBalance, transactions: primaryTransactions, evidence: primaryEvidence, visible_notes: false, expires_at: expiry ? new Date(expiry).toISOString() : null, allow_download: false }) })); if (result) setReport({ ...result, status: "active" }); }}><Link2 size={17} /> 공개 페이지 생성</button><button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button><button className="secondary danger" disabled={!report?.report_id || report?.status === "revoked"} onClick={async () => { const result: any = await run("링크 폐기", () => request(`/monthly-reports/${report.report_id}/revoke`, { method: "POST" })); if (result) setReport({ ...report, status: "revoked" }); }}><Unlink size={17} /> 링크 폐기</button><button className="secondary" disabled={!report?.report_id} onClick={async () => { const result: any = await run("링크 재발급", () => request(`/monthly-reports/${report.report_id}/regenerate-link`, { method: "POST" })); if (result) setReport({ ...report, ...result }); }}><RefreshCw size={17} /> 재발급</button></div>
-            {report?.public_url && <div className="link-output"><Link2 size={17} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a></div>}
-          </>}
-
-          {activeTab === "discord" && <>
-            <section className="section-head"><div><p className="eyebrow">APPROVED DELIVERY</p><h2>Discord 공지</h2><p>Webhook은 암호화 저장되며 미리보기와 승인을 분리합니다.</p></div>{message && <StatusBadge value={message.status} />}</section>
-            <section className="workspace-grid"><div className="panel"><h3>Webhook</h3><div className="form-grid single"><label>이름<input value={webhookName} onChange={(e) => setWebhookName(e.target.value)} /></label><label>Webhook URL<input type="password" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} placeholder="화면과 로그에 원문을 남기지 않습니다" /></label></div>{webhook && <p className="secret-confirmed"><ShieldCheck size={16} /> {webhook.masked_url}</p>}</div><div className="panel"><h3>승인 상태</h3><div className="approval-flow"><span className={message ? "done" : ""}>미리보기</span><i /><span className={message?.status === "approved" || message?.status === "sent" ? "done" : ""}>승인</span><i /><span className={message?.status === "sent" ? "done" : ""}>전송</span></div>{message?.preview && <pre className="message-preview">{message.preview}</pre>}</div></section>
-            <div className="action-bar"><button disabled={!webhookUrl || !!busy} onClick={async () => { const result = await run("Webhook 저장", () => request("/discord/webhooks", { method: "POST", body: JSON.stringify({ name: webhookName, webhook_url: webhookUrl }) })); if (result) { setWebhook(result); setWebhookUrl(""); } }}><ShieldCheck size={17} /> Webhook 저장</button><button className="secondary" disabled={!report?.share_id || !webhook?.id || !!busy} onClick={async () => { const result = await run("메시지 미리보기", () => request("/discord/messages/preview", { method: "POST", body: JSON.stringify({ share_id: report.share_id, webhook_id: webhook.id }) })); if (result) setMessage(result); }}>미리보기</button><button className="approve" disabled={message?.status !== "pending_approval" || !!busy} onClick={async () => { const result = await run("메시지 승인", () => request(`/discord/messages/${message.message_id}/approve`, { method: "POST" })); if (result) setMessage(result); }}><CheckCircle2 size={17} /> 승인</button><button disabled={!(["approved", "failed"].includes(message?.status)) || !!busy} onClick={async () => { const result = await run("Discord 전송", () => request(`/discord/messages/${message.message_id}/send`, { method: "POST" })); if (result) setMessage(result); }}><Send size={17} /> 전송</button></div>
-          </>}
-
-          {activeTab === "history" && <>
-            <section className="section-head"><div><p className="eyebrow">AUDIT TRAIL</p><h2>감사 로그</h2><p>앞선 이벤트 해시를 포함하는 체인으로 변경 여부를 검증합니다.</p></div>{auditData?.chain && <StatusBadge value={auditData.chain.valid ? "CHAIN VALID" : "CHAIN INVALID"} />}</section>
-            <div className="action-bar"><button onClick={async () => { const result = await run("감사 로그 조회", () => request("/audit-logs")); if (result) setAuditData(result); }}><History size={17} /> 로그 새로고침</button></div>
-            <section className="audit-list">{auditData?.events?.map((event: any) => <article key={event.id}><div><strong>{event.action}</strong><span>{event.actor} · {event.actor_role}</span></div><div><code>{event.target_type}:{event.target_id || "-"}</code><time>{new Date(event.created_at).toLocaleString("ko-KR")}</time></div></article>) || <div className="empty-inline">감사 로그를 조회해주세요.</div>}</section>
-          </>}
-
-          {(error || output) && <aside className="result-drawer"><div><h3>작업 결과</h3>{busy && <span className="busy"><RefreshCw className="spin" size={14} /> {busy}</span>}</div>{error && <pre className="error-box">{error}</pre>}{output && <pre className="result-box">{JSON.stringify(output, null, 2)}</pre>}</aside>}
-        </>
-      )}
-    </main>
-  );
+  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/package"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>ATLAS</p><h1>Aegis 회계 자동화</h1></div></a><div className="session-state"><span className={`dot ${token ? "online" : ""}`} />{token ? `${username} · ${role}` : "로그인 필요"}</div></header>{!token ? <section className="login-surface"><div><p className="eyebrow">ACCOUNTING OPERATIONS</p><h2>회계 작업을 시작합니다</h2><p>권한이 부여된 Aegis 운영 계정으로 로그인하세요.</p></div><div className="login-form"><label>사용자<input value={username} onChange={(event) => setUsername(event.target.value)} /></label><label>역할<select value={role} onChange={(event) => setRole(event.target.value)}><option value="admin">관리자</option><option value="accountant">회계담당자</option><option value="president">회장</option><option value="reviewer">검토자</option></select></label><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button onClick={login}><LockKeyhole size={17} /> 로그인</button></div></section> : <><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={route === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{route === "ledger" ? <LedgerPage token={token} run={run} /> : route === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : route === "monthly" ? <MonthlyDeliveryPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></>}</main>;
 }
 
 const root = createRoot(document.getElementById("root")!);

@@ -109,6 +109,10 @@ class EvidenceAttachRequest(BaseModel):
     evidence_ids: list[str]
 
 
+class BankAttachRequest(BaseModel):
+    upload_id: str
+
+
 class TransactionPatchRequest(BaseModel):
     number: int | None = None
     date: str | None = None
@@ -223,6 +227,13 @@ class GoogleSheetSnapshotRequest(BaseModel):
 
 class GoogleSheetUrlSnapshotRequest(GoogleSheetSnapshotRequest):
     spreadsheet_url_or_id: str = Field(min_length=1)
+
+
+class GoogleMonthlyPublishRequest(BaseModel):
+    source_spreadsheet_url_or_id: str = Field(min_length=1)
+    destination_spreadsheet_url_or_id: str = Field(min_length=1)
+    range: str = "B:I"
+    club_name: str = "Aegis"
 
 
 EvidenceKind = Literal["receipt", "explanation", "account_capture", "other"]

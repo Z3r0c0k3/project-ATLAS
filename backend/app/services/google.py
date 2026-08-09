@@ -13,8 +13,8 @@ from .naming import normalize_file_record_names
 GOOGLE_SHEETS_SCOPES = [
     "openid",
     "email",
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
@@ -51,11 +51,16 @@ def google_connection_status(connection: dict | None) -> dict:
             "required_scopes": GOOGLE_SHEETS_SCOPES,
             "message": "Google OAuth credentials are not connected.",
         }
+    granted_scopes = set(connection.get("scopes", []))
     return {
         "id": connection.get("id"),
         "connected": True,
         "account_email": connection["account_email"],
-        "scopes": connection.get("scopes", []),
+        "scopes": sorted(granted_scopes),
+        "write_access": {
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        }.issubset(granted_scopes),
         "has_refresh_token": bool(connection.get("encrypted_refresh_token")),
     }
 
@@ -153,6 +158,31 @@ def _api_get(url: str, access_token: str, params: dict | None = None) -> dict:
         raise GoogleApiError(f"Google API response could not be processed: {exc}") from exc
 
 
+def _api_json(url: str, access_token: str, method: str = "GET", payload: dict | None = None, params: dict | None = None) -> dict:
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise GoogleApiError(_format_google_http_error(exc.code, detail, "Google API request failed"), exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise GoogleApiError(f"Google API connection failed: {exc.reason}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise GoogleApiError(f"Google API request timed out: {exc}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GoogleApiError(f"Google API response could not be processed: {exc}") from exc
+
+
 def list_spreadsheets(access_token: str) -> list[dict]:
     result = _api_get(
         "https://www.googleapis.com/drive/v3/files",
@@ -192,3 +222,55 @@ def get_sheet_values(access_token: str, spreadsheet_id: str, range_name: str) ->
             "dateTimeRenderOption": "FORMATTED_STRING",
         },
     )
+
+
+def publish_monthly_sheet(access_token: str, spreadsheet_id: str, sheet_title: str, values: list[list[object]]) -> dict:
+    encoded_id = urllib.parse.quote(spreadsheet_id, safe="")
+    metadata = _api_json(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{encoded_id}",
+        access_token,
+        params={"fields": "sheets(properties(sheetId,title))"},
+    )
+    existing_titles = {str(item.get("properties", {}).get("title") or "") for item in metadata.get("sheets", [])}
+    unique_title = sheet_title
+    suffix = 2
+    while unique_title in existing_titles:
+        unique_title = f"{sheet_title} ({suffix})"
+        suffix += 1
+
+    created = _api_json(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{encoded_id}:batchUpdate",
+        access_token,
+        "POST",
+        {"requests": [{"addSheet": {"properties": {"title": unique_title}}}]},
+    )
+    sheet_id = int(created["replies"][0]["addSheet"]["properties"]["sheetId"])
+    range_name = urllib.parse.quote(f"'{unique_title}'!A1:H{max(1, len(values))}", safe="")
+    _api_json(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{encoded_id}/values/{range_name}",
+        access_token,
+        "PUT",
+        {"range": f"'{unique_title}'!A1:H{max(1, len(values))}", "majorDimension": "ROWS", "values": values},
+        {"valueInputOption": "USER_ENTERED"},
+    )
+
+    permissions_url = f"https://www.googleapis.com/drive/v3/files/{encoded_id}/permissions"
+    permissions = _api_json(
+        permissions_url,
+        access_token,
+        params={"fields": "permissions(id,type,role)", "supportsAllDrives": "true"},
+    )
+    if not any(item.get("type") == "anyone" and item.get("role") == "reader" for item in permissions.get("permissions", [])):
+        _api_json(
+            permissions_url,
+            access_token,
+            "POST",
+            {"type": "anyone", "role": "reader", "allowFileDiscovery": False},
+            {"supportsAllDrives": "true", "sendNotificationEmail": "false"},
+        )
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_id": sheet_id,
+        "sheet_title": unique_title,
+        "public_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid={sheet_id}",
+    }

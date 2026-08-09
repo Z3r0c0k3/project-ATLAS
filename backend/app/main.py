@@ -7,6 +7,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,11 +16,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from .models import (
     AcknowledgeIssuesRequest,
     AuthSession,
+    BankAttachRequest,
     DiscordMessageResponse,
     DiscordPreviewRequest,
     DiscordWebhookRequest,
     EvidenceAttachRequest,
     GoogleConnectRequest,
+    GoogleMonthlyPublishRequest,
     GoogleSheetSnapshotRequest,
     GoogleSheetUrlSnapshotRequest,
     LedgerSnapshotRequest,
@@ -51,6 +54,7 @@ from .services.google import (
     google_connection_status,
     list_drive_files,
     list_spreadsheets,
+    publish_monthly_sheet,
     refresh_access_token,
 )
 from .services.integrity import canonical_sha256, file_sha256
@@ -78,6 +82,7 @@ ROOT_PATH = os.getenv("ROOT_PATH", "")
 LOGIN_PASSWORD = os.getenv("ATLAS_LOGIN_PASSWORD")
 DEFAULT_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_LEDGER_SHEET_URL", "")
 DEFAULT_DUES_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_DUES_LEDGER_SHEET_URL", "")
+DEFAULT_MONTHLY_PUBLIC_SHEET_URL = os.getenv("ATLAS_DEFAULT_MONTHLY_PUBLIC_SHEET_URL", "")
 try:
     USER_ROLES = json.loads(os.getenv("ATLAS_USER_ROLES", "{}"))
 except json.JSONDecodeError as exc:
@@ -255,6 +260,7 @@ def create_snapshot_revision(
     evidence: list[dict],
     session: dict,
     mutation: dict,
+    source_patch: dict | None = None,
 ) -> dict:
     account_id = current["account_id"]
     scoped_evidence = [item for item in evidence if item.get("account_id", "primary") == account_id]
@@ -268,7 +274,7 @@ def create_snapshot_revision(
         scoped_transactions.append(row)
     normalized_transactions = normalize_transactions(scoped_transactions)
     normalized_evidence = normalize_evidence(scoped_evidence)
-    source = {**current.get("source", {}), "parent_snapshot_id": current["id"], "mutation": mutation}
+    source = {**current.get("source", {}), **(source_patch or {}), "parent_snapshot_id": current["id"], "mutation": mutation}
     return store.insert(
         "ledger_snapshots",
         {
@@ -445,6 +451,13 @@ def extract_spreadsheet_id(spreadsheet_url_or_id: str) -> str:
     raise HTTPException(status_code=422, detail="Invalid Google Sheet URL or ID")
 
 
+def previous_month_period(now: datetime | None = None) -> tuple[str, str]:
+    current = now or datetime.now(ZoneInfo("Asia/Seoul"))
+    first_of_month = current.replace(day=1)
+    previous = first_of_month - timedelta(days=1)
+    return previous.strftime("%Y-%m"), f"{previous.year}년 {previous.month}월"
+
+
 def create_google_sheet_snapshot(spreadsheet_id: str, payload: GoogleSheetSnapshotRequest, session: dict) -> dict:
     connection = current_google_connection()
     if not connection:
@@ -513,6 +526,7 @@ def get_config_defaults(
     return {
         "default_ledger_sheet_url": DEFAULT_LEDGER_SHEET_URL,
         "default_dues_ledger_sheet_url": DEFAULT_DUES_LEDGER_SHEET_URL,
+        "default_monthly_public_sheet_url": DEFAULT_MONTHLY_PUBLIC_SHEET_URL,
     }
 
 
@@ -1077,6 +1091,66 @@ def attach_snapshot_evidence(
     return created
 
 
+@app.post("/ledger-snapshots/{snapshot_id}/bank-transactions")
+def attach_snapshot_bank_transactions(
+    snapshot_id: str,
+    payload: BankAttachRequest,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    current = store.get("ledger_snapshots", snapshot_id)
+    upload = store.get("uploads", payload.upload_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+    if not upload:
+        raise HTTPException(status_code=404, detail="Bank upload not found")
+    if not current.get("transactions"):
+        raise HTTPException(status_code=422, detail="은행 거래내역을 연결할 장부 거래가 없습니다.")
+    bank_path = Path(upload["path"])
+    try:
+        bank = parse_ibk_bank_pdf(bank_path) if is_ibk_bank_pdf(bank_path) else parse_toss_bank(bank_path)
+        reconciliation = reconcile_ledger_bank({"transactions": current["transactions"]}, bank)
+    except WorkbookParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    source_files = [
+        item
+        for item in (current.get("source") or {}).get("source_files", [])
+        if item.get("kind") != "bank_workbook"
+    ]
+    source_files.append(
+        {
+            "kind": "bank_workbook",
+            "filename": normalize_filename(upload["filename"]),
+            "local_path": upload["path"],
+            "sha256": upload["sha256"],
+        }
+    )
+    created = create_snapshot_revision(
+        current,
+        [dict(item) for item in current["transactions"]],
+        [dict(item) for item in current.get("evidence", [])],
+        session,
+        {"action": "bank_transactions.attached", "upload_id": upload["id"]},
+        {
+            "source_files": source_files,
+            "bank_summary": {key: value for key, value in bank.items() if key not in {"transactions", "continuity_failures"}},
+            "bank_transactions": bank.get("transactions", []),
+            "bank_continuity_failures": bank.get("continuity_failures", []),
+            "reconciliation": reconciliation,
+        },
+    )
+    audit(
+        session,
+        "ledger_snapshot.bank_transactions_attached",
+        "ledger_snapshot",
+        created["id"],
+        before={"parent_snapshot_id": snapshot_id},
+        after={"upload_id": upload["id"], "reconciliation": reconciliation},
+        request=request,
+    )
+    return created
+
+
 @app.post(
     "/packages/submission",
     response_model=PackageJobResponse,
@@ -1143,7 +1217,7 @@ def create_submission_package(
                     "ledger_data_hash": latest_snapshots["primary"]["data_hash"],
                     "opening_balance": payload_data.get("primary_opening_balance") or 0,
                     "expected_closing_balance": payload_data.get("primary_expected_closing_balance"),
-                    "period_start": (latest_snapshots["primary"].get("source") or {}).get("period_start"),
+                    "period_start": payload_data.get("period_start") or (latest_snapshots["primary"].get("source") or {}).get("period_start"),
                     "period_end": (latest_snapshots["primary"].get("source") or {}).get("period_end"),
                     "transactions": normalize_transactions(latest_snapshots["primary"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["primary"]["evidence"]),
@@ -1156,7 +1230,7 @@ def create_submission_package(
                     "ledger_data_hash": latest_snapshots["dues_intake"]["data_hash"],
                     "opening_balance": payload_data.get("dues_opening_balance") or 0,
                     "expected_closing_balance": payload_data.get("dues_expected_closing_balance"),
-                    "period_start": (latest_snapshots["dues_intake"].get("source") or {}).get("period_start"),
+                    "period_start": payload_data.get("period_start") or (latest_snapshots["dues_intake"].get("source") or {}).get("period_start"),
                     "period_end": (latest_snapshots["dues_intake"].get("source") or {}).get("period_end"),
                     "transactions": normalize_transactions(latest_snapshots["dues_intake"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["dues_intake"]["evidence"]),
@@ -1398,6 +1472,88 @@ def create_monthly_report(
     )
 
 
+@app.post("/monthly-reports/google-sheet")
+def create_google_sheet_monthly_report(
+    payload: GoogleMonthlyPublishRequest,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president)),
+) -> dict:
+    connection = current_google_connection()
+    if not connection:
+        raise HTTPException(status_code=409, detail="Google account is not connected")
+    source_spreadsheet_id = extract_spreadsheet_id(payload.source_spreadsheet_url_or_id)
+    destination_spreadsheet_id = extract_spreadsheet_id(payload.destination_spreadsheet_url_or_id)
+    month_key, month_label = previous_month_period()
+    try:
+        source = call_google_api(connection, lambda token: get_sheet_values(token, source_spreadsheet_id, payload.range))
+        rows = [item for item in parse_google_sheet_rows(source.get("values", []), 0) if str(item.get("date") or "").startswith(month_key)]
+        if not rows:
+            raise HTTPException(status_code=422, detail=f"{month_label} 동아리운영계좌 거래가 없습니다.")
+        normalized = normalize_transactions([{**item, "account_id": "primary", "period": month_label} for item in rows])
+        sheet_values: list[list[object]] = [["No", "날짜", "내용", "수입", "지출", "잔액", "처리방식", "상세정보"]]
+        sheet_values.extend(
+            [
+                item.number,
+                item.date,
+                item.description,
+                item.income,
+                item.expense,
+                item.balance,
+                item.processing_method,
+                item.details,
+            ]
+            for item in normalized
+        )
+        published = call_google_api(
+            connection,
+            lambda token: publish_monthly_sheet(token, destination_spreadsheet_id, month_label, sheet_values),
+        )
+    except GoogleApiError as exc:
+        raise_google_http_error(exc)
+
+    opening_balance = normalized[0].balance - normalized[0].income + normalized[0].expense
+    share_id = secrets.token_urlsafe(32)
+    report_payload = build_monthly_report_payload(
+        "pending",
+        share_id,
+        payload.club_name,
+        month_label,
+        opening_balance,
+        normalized,
+        False,
+    )
+    report_payload.update(
+        {
+            "public_url": published["public_url"],
+            "source_type": "google_sheet",
+            "source_spreadsheet_id": source_spreadsheet_id,
+            "destination_spreadsheet_id": destination_spreadsheet_id,
+            "sheet_id": published["sheet_id"],
+            "sheet_title": published["sheet_title"],
+        }
+    )
+    report = store.insert("monthly_reports", report_payload, "rep")
+    audit(
+        session,
+        "monthly_report.google_sheet_created",
+        "monthly_report",
+        report["id"],
+        after={"month": month_label, "sheet_title": published["sheet_title"], "transaction_count": len(normalized)},
+        request=request,
+    )
+    return {
+        "report_id": report["id"],
+        "share_id": share_id,
+        "month": month_label,
+        "transaction_count": len(normalized),
+        "public_url": published["public_url"],
+        "sheet_id": published["sheet_id"],
+        "sheet_title": published["sheet_title"],
+        "summary": report["summary"],
+        "status": report["status"],
+    }
+
+
 @app.get("/monthly-reports")
 def list_monthly_reports(
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
@@ -1468,6 +1624,16 @@ def regenerate_monthly_link(
     return {"report_id": report_id, "share_id": share_id, "public_url": f"{PUBLIC_FRONTEND_BASE_URL}/public/monthly/{share_id}", "status": updated["status"]}
 
 
+@app.get("/discord/webhooks")
+def list_discord_webhooks(
+    session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
+) -> list[dict]:
+    return [
+        {"id": item["id"], "name": item["name"], "masked_url": item["masked_url"], "created_at": item.get("created_at")}
+        for item in reversed(list(store.read_collection("discord_webhooks").values()))
+    ]
+
+
 @app.post("/discord/webhooks")
 def create_discord_webhook(
     payload: DiscordWebhookRequest,
@@ -1496,7 +1662,7 @@ def preview_discord_message(
         raise HTTPException(status_code=404, detail="Active monthly report not found")
     if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")
-    public_url = f"{PUBLIC_FRONTEND_BASE_URL}/public/monthly/{payload.share_id}"
+    public_url = report.get("public_url") or f"{PUBLIC_FRONTEND_BASE_URL}/public/monthly/{payload.share_id}"
     preview = render_monthly_discord_message(report, public_url)
     message = store.insert(
         "discord_messages",

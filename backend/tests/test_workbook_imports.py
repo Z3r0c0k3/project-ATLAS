@@ -232,6 +232,40 @@ class WorkbookApiTest(unittest.TestCase):
         self.assertEqual(len(attached.json()["evidence"]), 1)
         self.assertIn(evidence.json()["id"], attached.json()["transactions"][1]["evidence_ids"])
 
+    def test_bank_file_can_attach_to_google_ledger_snapshot_without_ledger_upload(self) -> None:
+        snapshot = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={
+                "account_id": "primary",
+                "period": "2026년 1학기",
+                "transactions": [
+                    {"number": 1, "date": "2026-03-01", "description": "이월금", "income": 1_000, "expense": 0, "balance": 1_000},
+                    {"number": 2, "date": "2026-03-02", "description": "물품 1", "income": 0, "expense": 200, "balance": 800},
+                ],
+            },
+        ).json()
+        bank_path = self.root / "toss-bank-only.xlsx"
+        make_bank(bank_path)
+        with bank_path.open("rb") as stream:
+            upload = self.client.post(
+                "/imports/upload",
+                headers=self.headers,
+                files={"file": (bank_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            ).json()
+
+        attached = self.client.post(
+            f"/ledger-snapshots/{snapshot['id']}/bank-transactions",
+            headers=self.headers,
+            json={"upload_id": upload["id"]},
+        )
+
+        self.assertEqual(attached.status_code, 200)
+        result = attached.json()
+        self.assertEqual(result["source"]["reconciliation"]["status"], "PASS")
+        self.assertEqual(len(result["source"]["bank_transactions"]), 1)
+        self.assertEqual(result["source"]["source_files"][0]["kind"], "bank_workbook")
+
 
 if __name__ == "__main__":
     unittest.main()
