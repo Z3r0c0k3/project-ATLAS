@@ -32,6 +32,7 @@ from .models import (
     PackageJobResponse,
     PackageReviewRequest,
     Role,
+    SnapshotRevisionRequest,
     SubmissionPackageRequest,
     TransactionInput,
     TransactionPatchRequest,
@@ -215,7 +216,7 @@ def snapshot_summary(snapshot: dict) -> dict:
         "period": snapshot["period"],
         "data_hash": snapshot["data_hash"],
         "transaction_count": len(snapshot.get("transactions", [])),
-        "evidence_count": len(snapshot.get("evidence", [])),
+        "evidence_count": sum(1 for item in snapshot.get("evidence", []) if item.get("local_path") and Path(item["local_path"]).is_file()),
         "source": snapshot.get("source"),
         "imported_by": snapshot.get("imported_by"),
         "created_at": snapshot.get("created_at"),
@@ -992,7 +993,14 @@ def create_ledger_snapshot(
 def list_ledger_snapshots(
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
 ) -> list[dict]:
-    return [snapshot_summary(item) for item in reversed(list(store.read_collection("ledger_snapshots").values()))]
+    rows = list(reversed(list(store.read_collection("ledger_snapshots").values())))
+    latest_ids: dict[str, str] = {}
+    for item in rows:
+        latest_ids.setdefault(item.get("account_id", "primary"), item["id"])
+    return [
+        {**snapshot_summary(item), "is_latest": latest_ids.get(item.get("account_id", "primary")) == item["id"]}
+        for item in rows
+    ]
 
 
 @app.get("/ledger-snapshots/{snapshot_id}")
@@ -1004,6 +1012,35 @@ def get_ledger_snapshot(
     if not snapshot:
         raise HTTPException(status_code=404, detail="Ledger snapshot not found")
     return public_snapshot_record(snapshot)
+
+
+@app.post("/ledger-snapshots/{snapshot_id}/revision")
+def create_manual_snapshot_revision(
+    snapshot_id: str,
+    payload: SnapshotRevisionRequest,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
+) -> dict:
+    current = store.get("ledger_snapshots", snapshot_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+    created = create_snapshot_revision(
+        current,
+        [dict(item) for item in current.get("transactions", [])],
+        [dict(item) for item in current.get("evidence", [])],
+        session,
+        {"action": f"snapshot.{payload.action}", "note": payload.note.strip()},
+    )
+    audit(
+        session,
+        f"ledger_snapshot.{payload.action}",
+        "ledger_snapshot",
+        created["id"],
+        before={"source_snapshot_id": snapshot_id},
+        after={"account_id": created["account_id"], "data_hash": created["data_hash"]},
+        request=request,
+    )
+    return public_snapshot_record(created)
 
 
 @app.post("/ledger-snapshots/{snapshot_id}/transactions")

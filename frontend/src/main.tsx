@@ -8,12 +8,14 @@ import {
   ExternalLink,
   FileArchive,
   FileSpreadsheet,
+  History,
   Link2,
   LoaderCircle,
   LockKeyhole,
   LogOut,
   ReceiptText,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   ShieldCheck,
@@ -29,7 +31,7 @@ const PERIOD_END = `${CURRENT_YEAR}-12-31`;
 const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
 
 type AccountId = "primary" | "dues_intake";
-type RouteId = "package" | "ledger" | "public-report";
+type RouteId = "package" | "ledger" | "snapshots" | "public-report";
 type ToastState = { kind: "loading" | "success" | "error"; title: string; detail?: string };
 type Runner = <T>(label: string, action: () => Promise<T>) => Promise<T | undefined>;
 
@@ -65,7 +67,7 @@ const ACCOUNT_LABELS: Record<AccountId, string> = {
 function routeFromPath(): RouteId {
   const segment = window.location.pathname.split("/").filter(Boolean)[0];
   if (segment === "monthly") return "public-report";
-  return segment === "ledger" || segment === "public-report" ? segment : "package";
+  return segment === "ledger" || segment === "snapshots" || segment === "public-report" ? segment : "package";
 }
 
 function previousMonthValue(): string {
@@ -485,6 +487,53 @@ function AccountReadiness({ accountId, snapshot, historyCount }: { accountId: Ac
   return <article className={ready ? "ready" : ""}><div className="readiness-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={ready ? "READY" : "REQUIRED"} /></div><dl><div><dt>장부</dt><dd>{snapshot?.transactions?.length ? `${snapshot.transactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{evidence}개</dd></div><div><dt>계좌 전체내역</dt><dd>{historyCount ? `${historyCount}개` : "필요"}</dd></div></dl></article>;
 }
 
+function snapshotSourceLabel(snapshot: any): string {
+  const action = snapshot.source?.mutation?.action;
+  if (action === "snapshot.checkpoint") return "수동 체크포인트";
+  if (action === "snapshot.restore") return "과거 버전 복원";
+  if (action === "evidence.attached") return "증빙 연결";
+  if (action === "bank_transactions.attached") return "계좌내역 연결";
+  if (snapshot.source?.type === "google_sheets") return "Google Sheets";
+  if (snapshot.source?.type === "workbook_upload") return "파일 가져오기";
+  return "장부 생성";
+}
+
+function SnapshotManagementPage({ token, run }: { token: string; run: Runner }) {
+  const [snapshots, setSnapshots] = useState<any[]>([]);
+  const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
+  const [note, setNote] = useState("");
+
+  const loadSnapshots = useCallback(() => api<any[]>("/ledger-snapshots", token).then(setSnapshots), [token]);
+  useEffect(() => { loadSnapshots().catch(() => undefined); }, [loadSnapshots]);
+
+  async function createRevision(snapshot: any, action: "checkpoint" | "restore") {
+    const label = action === "checkpoint" ? "스냅샷 생성" : "스냅샷 복원";
+    const result = await run(label, () => api<any>(`/ledger-snapshots/${snapshot.id}/revision`, token, {
+      method: "POST",
+      body: JSON.stringify({ action, note }),
+    }));
+    if (result) { setNote(""); await loadSnapshots(); }
+  }
+
+  const visible = snapshots.filter((item) => accountFilter === "all" || item.account_id === accountFilter);
+  const latestByAccount = Object.fromEntries((["primary", "dues_intake"] as AccountId[]).map((accountId) => [accountId, snapshots.find((item) => item.account_id === accountId && item.is_latest)]));
+
+  return <>
+    <PageHeading eyebrow="SNAPSHOT HISTORY" title="스냅샷 관리" description="장부 버전을 보존하고 필요한 시점으로 복원합니다." />
+    <section className="snapshot-current-grid">
+      {(["primary", "dues_intake"] as AccountId[]).map((accountId) => {
+        const current = latestByAccount[accountId];
+        return <article className="panel" key={accountId}><div className="panel-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={current ? "LATEST" : "EMPTY"} /></div>{current ? <dl className="snapshot-summary"><div><dt>거래</dt><dd>{current.transaction_count}건</dd></div><div><dt>증빙</dt><dd>{current.evidence_count}개</dd></div><div><dt>생성</dt><dd>{new Date(current.created_at).toLocaleString("ko-KR")}</dd></div></dl> : <p className="muted">현재 장부 스냅샷이 없습니다.</p>}<button disabled={!current} onClick={() => createRevision(current, "checkpoint").catch(() => undefined)}><History size={16} /> 현재 상태 스냅샷 생성</button>{!current && <button className="secondary" onClick={() => window.location.assign("/ledger")}><FileSpreadsheet size={16} /> 장부 연결</button>}</article>;
+      })}
+    </section>
+    <section className="panel snapshot-history">
+      <div className="panel-heading"><div><p className="eyebrow">VERSIONS</p><h3>스냅샷 이력</h3></div><select className="inline-select" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as AccountId | "all")}><option value="all">전체 계좌</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></div>
+      <label className="snapshot-note">메모<input value={note} maxLength={200} onChange={(event) => setNote(event.target.value)} placeholder="선택 사항" /></label>
+      <div className="table-scroll"><table><thead><tr><th>상태</th><th>계좌</th><th>생성 시각</th><th>거래</th><th>증빙</th><th>생성 원인</th><th>메모</th><th>작업</th></tr></thead><tbody>{visible.map((snapshot) => <tr key={snapshot.id}><td>{snapshot.is_latest ? <StatusBadge value="LATEST" /> : "-"}</td><td><span className={`account-tag ${snapshot.account_id}`}>{snapshot.account_id === "dues_intake" ? "회비" : "운영"}</span></td><td>{new Date(snapshot.created_at).toLocaleString("ko-KR")}</td><td>{snapshot.transaction_count}건</td><td>{snapshot.evidence_count}개</td><td>{snapshotSourceLabel(snapshot)}</td><td>{snapshot.source?.mutation?.note || "-"}</td><td><button className="icon-button" disabled={snapshot.is_latest} title="이 버전 복원" aria-label={`${snapshot.id} 복원`} onClick={() => createRevision(snapshot, "restore").catch(() => undefined)}><RotateCcw size={15} /></button></td></tr>)}{!visible.length && <tr><td className="empty-row" colSpan={8}>스냅샷이 없습니다.</td></tr>}</tbody></table></div>
+    </section>
+  </>;
+}
+
 function PublicReportAdminPage({ token, run }: { token: string; run: Runner }) {
   const workspace = useWorkspace(token, run);
   const [month, setMonth] = useState(previousMonthValue());
@@ -623,10 +672,11 @@ function App() {
   const tabs: Array<{ id: RouteId; href: string; label: string; icon: React.ReactNode }> = [
     { id: "package", href: "/package", label: "동연 패키지", icon: <FileArchive size={17} /> },
     { id: "ledger", href: "/ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
+    { id: "snapshots", href: "/snapshots", label: "스냅샷 관리", icon: <History size={17} /> },
     { id: "public-report", href: "/public-report", label: "월간 공개", icon: <Link2 size={17} /> },
   ];
 
-  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/package"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>ATLAS</p><h1>Aegis 회계 자동화</h1></div></a><div className="session-state"><span className={`dot ${token ? "online" : ""}`} />{token ? `${username} · ${role}` : "로그인 필요"}</div></header>{!token ? <section className="login-surface"><div><p className="eyebrow">ACCOUNTING OPERATIONS</p><h2>회계 작업을 시작합니다</h2><p>권한이 부여된 Aegis 운영 계정으로 로그인하세요.</p></div><div className="login-form"><label>사용자<input value={username} onChange={(event) => setUsername(event.target.value)} /></label><label>역할<select value={role} onChange={(event) => setRole(event.target.value)}><option value="admin">관리자</option><option value="accountant">회계담당자</option><option value="president">회장</option><option value="reviewer">검토자</option></select></label><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button onClick={login}><LockKeyhole size={17} /> 로그인</button></div></section> : <><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={route === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{route === "ledger" ? <LedgerPage token={token} run={run} /> : route === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></>}</main>;
+  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/package"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>ATLAS</p><h1>Aegis 회계 자동화</h1></div></a><div className="session-state"><span className={`dot ${token ? "online" : ""}`} />{token ? `${username} · ${role}` : "로그인 필요"}</div></header>{!token ? <section className="login-surface"><div><p className="eyebrow">ACCOUNTING OPERATIONS</p><h2>회계 작업을 시작합니다</h2><p>권한이 부여된 Aegis 운영 계정으로 로그인하세요.</p></div><div className="login-form"><label>사용자<input value={username} onChange={(event) => setUsername(event.target.value)} /></label><label>역할<select value={role} onChange={(event) => setRole(event.target.value)}><option value="admin">관리자</option><option value="accountant">회계담당자</option><option value="president">회장</option><option value="reviewer">검토자</option></select></label><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button onClick={login}><LockKeyhole size={17} /> 로그인</button></div></section> : <><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={route === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{route === "ledger" ? <LedgerPage token={token} run={run} /> : route === "snapshots" ? <SnapshotManagementPage token={token} run={run} /> : route === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></>}</main>;
 }
 
 const root = createRoot(document.getElementById("root")!);

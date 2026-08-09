@@ -501,6 +501,32 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(len(deleted.json()["transactions"]), 2)
 
+    def test_manual_checkpoint_and_restore_create_new_latest_revisions(self) -> None:
+        original = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={"period": "2026년", "transactions": TRANSACTIONS},
+        ).json()
+        checkpoint = self.client.post(
+            f"/ledger-snapshots/{original['id']}/revision",
+            headers=self.headers,
+            json={"action": "checkpoint", "note": "월말 확인"},
+        )
+        restored = self.client.post(
+            f"/ledger-snapshots/{original['id']}/revision",
+            headers=self.headers,
+            json={"action": "restore", "note": "원본 복원"},
+        )
+
+        self.assertEqual(checkpoint.status_code, 200)
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(checkpoint.json()["source"]["mutation"]["action"], "snapshot.checkpoint")
+        self.assertEqual(restored.json()["source"]["mutation"]["action"], "snapshot.restore")
+        history = self.client.get("/ledger-snapshots", headers=self.headers).json()
+        self.assertEqual(history[0]["id"], restored.json()["id"])
+        self.assertTrue(history[0]["is_latest"])
+        self.assertFalse(next(item for item in history if item["id"] == original["id"])["is_latest"])
+
     def test_snapshots_keep_same_number_transactions_separate_by_account(self) -> None:
         transaction = {
             "number": 1,

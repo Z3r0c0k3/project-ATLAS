@@ -109,6 +109,11 @@ class EvidenceAttachRequest(BaseModel):
     evidence_ids: list[str]
 
 
+class SnapshotRevisionRequest(BaseModel):
+    action: Literal["checkpoint", "restore"] = "checkpoint"
+    note: str = Field(default="", max_length=200)
+
+
 class BankAttachRequest(BaseModel):
     upload_id: str
 
