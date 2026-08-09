@@ -47,7 +47,7 @@ def ibk_pdf_to_aegis_ledger(
 
     wb = Workbook()
     ws = wb.active
-    ws.title = semester or "회비입금계좌"
+    ws.title = semester or "회비입금계좌(IBK기업은행)"
     ws.sheet_properties.tabColor = "2F5496"
 
     thin_border = Border(
@@ -68,7 +68,7 @@ def ibk_pdf_to_aegis_ledger(
     title_font = Font(name="맑은 고딕", size=14, bold=True, color="1F3864")
 
     ws.merge_cells("B1:I1")
-    ws["B1"] = f"{club_name} 회비입금계좌 회계장부"
+    ws["B1"] = f"{club_name} 회비입금계좌(IBK기업은행) 회계장부"
     ws["B1"].font = title_font
     ws["B1"].alignment = center_align
 

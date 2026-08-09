@@ -40,8 +40,8 @@ def _won(value: int) -> str:
 
 def _account_label(account_id: str | None) -> str:
     labels = {
-        "primary": "동아리 운영 토스뱅크 main 계좌",
-        "dues_intake": "회비입금전용 기업은행 계좌",
+        "primary": "동아리운영계좌(토스뱅크)",
+        "dues_intake": "회비입금계좌(IBK기업은행)",
     }
     return labels.get(account_id or "primary", account_id or "primary")
 
@@ -209,10 +209,10 @@ def generate_combined_ledger_workbook(
     wb = load_workbook(output_path)
     primary_sheet = wb.active
     dues_sheet = wb.copy_worksheet(primary_sheet)
-    primary_sheet.title = "운영계좌"
-    dues_sheet.title = "회비입금계좌"
+    primary_sheet.title = "동아리운영계좌(토스뱅크)"
+    dues_sheet.title = "회비입금계좌(IBK기업은행)"
     sheets = {"primary": primary_sheet, "dues_intake": dues_sheet}
-    sheet_labels = {"primary": "운영계좌", "dues_intake": "회비입금계좌"}
+    sheet_labels = {"primary": _account_label("primary"), "dues_intake": _account_label("dues_intake")}
     coverage: dict[str, dict] = {}
     for account_id, ws in sheets.items():
         bundle = accounts[account_id]
@@ -285,6 +285,8 @@ def _set_cell_text(cell, value: str) -> None:
 
 def _fill_image_cell(cell, image_path: Path, label: str, max_width: float, max_height: float) -> None:
     _set_cell_text(cell, label)
+    for extra_paragraph in list(cell.paragraphs[1:]):
+        extra_paragraph._element.getparent().remove(extra_paragraph._element)
     paragraph = cell.paragraphs[0]
     if label:
         paragraph.add_run("\n")
@@ -321,6 +323,8 @@ def _populate_evidence_slot(table, slot_index: int, entry: dict, treasurer_name:
     description = tx.description if tx else (item.filename if item else "미연결 자료")
     note = tx.note if tx and tx.note else (entry.get("message") or (item.filename if item else ""))
     amount = (tx.expense or tx.income) if tx else (item.amount if item else None)
+    if tx and "".join(tx.processing_method.split()) in {"카드결제취소", "이자입금취소"}:
+        amount = -abs(amount or 0)
 
     _set_cell_text(table.cell(base, 1), f"날짜 : {date_value or '-'}")
     _set_cell_text(table.cell(base, 3), f"번호(수입지출관리대장) : {number_value or '-'}")
@@ -483,8 +487,7 @@ def _render_bank_transaction_pages(rows: list[dict], output_dir: Path, account_i
     for page_index, page_rows in enumerate(pages, start=1):
         image = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(image)
-        short_label = "운영계좌(토스뱅크)" if account_id == "primary" else "회비입금계좌(기업은행)"
-        draw.text((margin, 35), f"{short_label} 거래내역", fill="#172026", font=title_font)
+        draw.text((margin, 35), f"{_account_label(account_id)} 거래내역", fill="#172026", font=title_font)
         draw.text((width - 150, 42), f"{page_index} / {len(pages)}", fill="#52646a", font=body_font)
         top = header_height
         labels = ("거래일시", "거래내용", "입출금액", "거래후잔액", "구분")
@@ -946,7 +949,7 @@ def build_combined_submission_package(
 ) -> dict:
     required_accounts = {"primary", "dues_intake"}
     if set(accounts) != required_accounts:
-        raise ValueError("통합 동연 패키지에는 운영계좌와 회비입금계좌 장부가 모두 필요합니다.")
+        raise ValueError("통합 동연 패키지에는 동아리운영계좌(토스뱅크)와 회비입금계좌(IBK기업은행) 장부가 모두 필요합니다.")
 
     package_dir = output_root / package_id
     package_dir.mkdir(parents=True, exist_ok=True)
@@ -954,8 +957,8 @@ def build_combined_submission_package(
     ledger_path = package_dir / "동아리 수입지출관리대장.xlsx"
     account_path = package_dir / "동아리 계좌 전체내역.docx"
     evidence_paths = {
-        "primary": package_dir / "영수증 및 소명자료 - 동아리운영계좌.docx",
-        "dues_intake": package_dir / "영수증 및 소명자료 - 회비입금계좌.docx",
+        "primary": package_dir / "영수증 및 소명자료 - 동아리운영계좌(토스뱅크).docx",
+        "dues_intake": package_dir / "영수증 및 소명자료 - 회비입금계좌(IBK기업은행).docx",
     }
     report_path = package_dir / "검증_리포트.html"
     manifest_path = package_dir / "manifest.json"
@@ -1013,7 +1016,7 @@ def build_combined_submission_package(
 
     copied_evidence: list[dict] = []
     copied_sources: list[dict] = []
-    account_folders = {"primary": "동아리운영계좌", "dues_intake": "회비입금계좌"}
+    account_folders = {"primary": _account_label("primary"), "dues_intake": _account_label("dues_intake")}
     for account_id, bundle in accounts.items():
         evidence_dir = package_dir / "증빙 원본" / account_folders[account_id]
         source_dir = package_dir / "원본자료" / account_folders[account_id]

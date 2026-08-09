@@ -32,6 +32,11 @@ const DEFAULT_PERIOD_END = `${CURRENT_YEAR}-12-31`;
 
 type AccountId = "primary" | "dues_intake";
 
+const ACCOUNT_LABELS: Record<AccountId, string> = {
+  primary: "동아리운영계좌(토스뱅크)",
+  dues_intake: "회비입금계좌(IBK기업은행)",
+};
+
 type TransactionInput = {
   transaction_id?: string;
   account_id?: string;
@@ -638,10 +643,10 @@ function App() {
 
   async function importGoogleSheet() {
     if (!googleSheetSource.trim()) {
-      setError("운영계좌 Google 장부 URL 또는 ID를 입력해주세요.");
+      setError(`${ACCOUNT_LABELS.primary} Google 장부 URL 또는 ID를 입력해주세요.`);
       return;
     }
-    const result: any = await run("운영계좌 Google 장부 스냅샷 생성", () => request("/google/sheets/snapshot", {
+    const result: any = await run(`${ACCOUNT_LABELS.primary} Google 장부 스냅샷 생성`, () => request("/google/sheets/snapshot", {
       method: "POST",
       body: JSON.stringify({
         spreadsheet_url_or_id: googleSheetSource.trim(),
@@ -668,10 +673,10 @@ function App() {
 
   async function importGoogleDuesSheet() {
     if (!duesSheetSource.trim()) {
-      setError("회비입금계좌 Google 장부 URL 또는 ID를 입력해주세요.");
+      setError(`${ACCOUNT_LABELS.dues_intake} Google 장부 URL 또는 ID를 입력해주세요.`);
       return;
     }
-    const result: any = await run("회비입금계좌 Google 장부 스냅샷 생성", () => request("/google/sheets/snapshot", {
+    const result: any = await run(`${ACCOUNT_LABELS.dues_intake} Google 장부 스냅샷 생성`, () => request("/google/sheets/snapshot", {
       method: "POST",
       body: JSON.stringify({
         spreadsheet_url_or_id: duesSheetSource.trim(),
@@ -790,8 +795,8 @@ function App() {
 
           <section className="metric-grid">
             {activeTab === "package" ? <>
-              <Metric label="운영계좌 거래" value={`${primaryTransactions.length}건`} />
-              <Metric label="회비계좌 거래" value={`${duesTransactions.length}건`} />
+              <Metric label={`${ACCOUNT_LABELS.primary} 거래`} value={`${primaryTransactions.length}건`} />
+              <Metric label={`${ACCOUNT_LABELS.dues_intake} 거래`} value={`${duesTransactions.length}건`} />
               <Metric label="연결된 증빙" value={`${primaryEvidence.length + duesEvidence.length}개`} />
               <Metric label="계좌 전체내역" value={`${Number(primaryHistoryCount > 0) + Number(duesHistoryCount > 0)}/2 계좌`} />
             </> : <>
@@ -807,14 +812,14 @@ function App() {
                 <div className="panel-heading"><h3>Google 자료 연결</h3>{googleConnection && <StatusBadge value={googleConnection.connected ? "CONNECTED" : "DISCONNECTED"} />}</div>
                 <p className="muted">{googleConnection?.connected ? `${googleConnection.account_email} · 읽기 전용 연결` : "운영 계정의 Sheets 장부와 Drive 증빙을 읽기 전용으로 연결합니다."}</p>
                 <div className="form-grid single google-import-form">
-                  <label>운영계좌 장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
-                  <label>회비입금계좌 장부 URL 또는 ID<input value={duesSheetSource} onChange={(event) => setDuesSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
+                  <label>{ACCOUNT_LABELS.primary} 장부 URL 또는 ID<input value={googleSheetSource} onChange={(event) => setGoogleSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
+                  <label>{ACCOUNT_LABELS.dues_intake} 장부 URL 또는 ID<input value={duesSheetSource} onChange={(event) => setDuesSheetSource(event.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." /></label>
                   <label>가져올 범위<input value={googleSheetRange} onChange={(event) => setGoogleSheetRange(event.target.value)} placeholder="B:I 또는 시트명!B:I" /></label>
                 </div>
                 <div className="button-row">
                   {googleConnection?.connected ? <button className="secondary danger" onClick={disconnectGoogle}>연결 해제</button> : <button onClick={beginGoogleConnect}>Google 계정 연결</button>}
-                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleSheet}><FileSpreadsheet size={17} /> 운영계좌 장부 가져오기</button>
-                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleDuesSheet}><FileSpreadsheet size={17} /> 회비계좌 장부 가져오기</button>
+                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleSheet}><FileSpreadsheet size={17} /> {ACCOUNT_LABELS.primary} 가져오기</button>
+                  <button disabled={!googleConnection?.connected || !!busy} onClick={importGoogleDuesSheet}><FileSpreadsheet size={17} /> {ACCOUNT_LABELS.dues_intake} 가져오기</button>
                   <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Google 진단", () => request("/google/diagnostics"))}>Google 진단</button>
                   <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Sheets 조회", () => request("/google/sheets"))}>Google Sheets</button>
                   <button className="secondary" disabled={!googleConnection?.connected} onClick={() => run("Drive 조회", () => request("/google/drive/files"))}>Google Drive</button>
@@ -824,11 +829,11 @@ function App() {
             <details className="advanced-editor import-details">
               <summary>파일 기반 장부 가져오기 (보조)</summary>
               <section className="import-surface">
-              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => { const accountId = event.target.value as AccountId; setLedgerAccountId(accountId); resetTransactionDraft(accountId === "dues_intake" ? duesTransactions : primaryTransactions, accountId); }}><option value="primary">운영계좌 (토스뱅크)</option><option value="dues_intake">회비입금계좌 (기업은행)</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
+              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => { const accountId = event.target.value as AccountId; setLedgerAccountId(accountId); resetTransactionDraft(accountId === "dues_intake" ? duesTransactions : primaryTransactions, accountId); }}><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
                 <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 / IBK 거래내역</span><small>{bankUpload?.filename || ".xlsx / .pdf"}</small><input type="file" accept=".xlsx,.xlsm,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
-                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="수동 번호 (파일명 없을 때)" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : "#장부ID# → 운영계좌 · *장부ID* → 회비계좌 자동 매칭"}</small></div>
+                <div className="upload-slot evidence-slot"><ReceiptText size={22} /><span>영수증·소명·캡처</span><div className="evidence-options"><select aria-label="증빙 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value as EvidenceInput["kind"])}><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 캡처</option><option value="other">기타</option></select><input aria-label="장부 번호" type="number" min="1" placeholder="수동 번호 (파일명 없을 때)" value={evidenceTransactionNumber} onChange={(event) => setEvidenceTransactionNumber(event.target.value)} /></div><label className="mini-file-button"><Upload size={15} /> 파일 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidenceFiles(event.target.files); }} /></label><small>{evidenceUploads.length ? `${evidenceUploads.length}개 업로드됨` : `#장부ID# → ${ACCOUNT_LABELS.primary} · *장부ID* → ${ACCOUNT_LABELS.dues_intake} 자동 매칭`}</small></div>
               </div>
               {snapshot?.source?.reconciliation && <div className="reconciliation-line"><ShieldCheck size={18} /><strong>잔액 차이 {money(snapshot.source.reconciliation.balance_delta)}</strong><span>장부 {snapshot.source.reconciliation.ledger_transaction_count}건 · 은행 {snapshot.source.reconciliation.bank_transaction_count}건 · 자동 매칭 {snapshot.source.reconciliation.matched_ledger_count}건</span></div>}
               <div className="action-bar"><button disabled={!ledgerUpload || !!busy} onClick={importWorkbooks}><Archive size={17} /> 실제 장부 가져오기</button><button className="secondary" disabled={!snapshot?.id || !evidenceUploads.length || !!busy} onClick={attachEvidenceToSnapshot}><ReceiptText size={17} /> 증빙 반영 새 버전</button>{snapshot && <code>{snapshot.id} · {snapshot.data_hash.slice(0, 16)}…</code>}</div>
@@ -856,8 +861,8 @@ function App() {
                   <h3>거래 목록</h3>
                   <select aria-label="계좌 필터" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as "primary" | "dues_intake" | "all")}>
                     <option value="all">전체 계좌</option>
-                    <option value="primary">운영계좌 (토스뱅크)</option>
-                    <option value="dues_intake">회비입금계좌 (기업은행)</option>
+                    <option value="primary">{ACCOUNT_LABELS.primary}</option>
+                    <option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option>
                   </select>
                 </div>
                 <table>
@@ -866,7 +871,7 @@ function App() {
                 </table>
               </div>
             </section>
-            <details className="advanced-editor"><summary>고급 데이터 보기</summary><section className="editor-grid"><label className="editor-block">운영계좌 거래 데이터<textarea readOnly value={JSON.stringify(primaryTransactions, null, 2)} /></label><label className="editor-block">회비계좌 거래 데이터<textarea readOnly value={JSON.stringify(duesTransactions, null, 2)} /></label></section></details>
+            <details className="advanced-editor"><summary>고급 데이터 보기</summary><section className="editor-grid"><label className="editor-block">{ACCOUNT_LABELS.primary} 거래 데이터<textarea readOnly value={JSON.stringify(primaryTransactions, null, 2)} /></label><label className="editor-block">{ACCOUNT_LABELS.dues_intake} 거래 데이터<textarea readOnly value={JSON.stringify(duesTransactions, null, 2)} /></label></section></details>
           </>}
 
           {activeTab === "package" && <>
@@ -874,17 +879,17 @@ function App() {
 
             <section className="package-readiness" aria-label="계좌별 준비 상태">
               <article className={primarySnapshot?.id && primaryHistoryCount ? "ready" : ""}>
-                <div className="readiness-heading"><div><span className="account-tag primary">운영</span><h3>동아리운영계좌</h3></div><StatusBadge value={primarySnapshot?.id && primaryHistoryCount ? "READY" : "REQUIRED"} /></div>
+                <div className="readiness-heading"><div><span className="account-tag primary">운영</span><h3>{ACCOUNT_LABELS.primary}</h3></div><StatusBadge value={primarySnapshot?.id && primaryHistoryCount ? "READY" : "REQUIRED"} /></div>
                 <dl><div><dt>장부</dt><dd>{primarySnapshot?.id ? `${primaryTransactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{primaryEvidence.filter((item) => item.kind !== "account_capture").length}개</dd></div><div><dt>계좌 전체내역</dt><dd>{primaryHistoryCount ? `${primaryHistoryCount}개` : "필요"}</dd></div></dl>
               </article>
               <article className={duesSnapshot?.id && duesHistoryCount ? "ready" : ""}>
-                <div className="readiness-heading"><div><span className="account-tag dues">회비</span><h3>회비입금계좌</h3></div><StatusBadge value={duesSnapshot?.id && duesHistoryCount ? "READY" : "REQUIRED"} /></div>
+                <div className="readiness-heading"><div><span className="account-tag dues">회비</span><h3>{ACCOUNT_LABELS.dues_intake}</h3></div><StatusBadge value={duesSnapshot?.id && duesHistoryCount ? "READY" : "REQUIRED"} /></div>
                 <dl><div><dt>장부</dt><dd>{duesSnapshot?.id ? `${duesTransactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{duesEvidence.filter((item) => item.kind !== "account_capture").length}개</dd></div><div><dt>계좌 전체내역</dt><dd>{duesHistoryCount ? `${duesHistoryCount}개` : "필요"}</dd></div></dl>
               </article>
             </section>
 
             <section className="package-upload-band">
-              <div><ReceiptText size={22} /><div><h3>영수증·소명·계좌 전체내역 일괄 등록</h3><p><strong>#장부ID#</strong>는 운영계좌, <strong>*장부ID*</strong>는 회비계좌로 연결됩니다. 파일명에 토스뱅크·기업은행·거래내역이 있으면 계좌 전체내역으로 분류합니다.</p></div></div>
+              <div><ReceiptText size={22} /><div><h3>영수증·소명·계좌 전체내역 일괄 등록</h3><p><strong>#장부ID#</strong>는 {ACCOUNT_LABELS.primary}, <strong>*장부ID*</strong>는 {ACCOUNT_LABELS.dues_intake}로 연결됩니다. 파일명에 토스뱅크·IBK기업은행·거래내역이 있으면 계좌 전체내역으로 분류합니다.</p></div></div>
               <label className="file-button"><Upload size={17} /> 파일 일괄 선택<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={async (event) => { if (event.target.files?.length) await uploadPackageEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
               <button className="secondary" disabled={(!primaryEvidenceUploads.length && !duesEvidenceUploads.length) || !primarySnapshot?.id || !duesSnapshot?.id || !!busy} onClick={() => attachEvidenceToBothSnapshots()}><RefreshCw size={17} /> 대기 자료 다시 반영</button>
             </section>
@@ -892,9 +897,9 @@ function App() {
             <section className="deliverables-panel">
               <div className="deliverables-heading"><div><p className="eyebrow">PACKAGE CONTENTS</p><h3>생성되는 제출 파일</h3></div><strong>필수 문서 4개</strong></div>
               <div className="deliverable-list">
-                <div><FileSpreadsheet size={20} /><span><strong>동아리 수입지출관리대장.xlsx</strong><small>공식 원본 양식 · 운영계좌/회비입금계좌 2개 시트</small></span><b>1개</b></div>
+                <div><FileSpreadsheet size={20} /><span><strong>동아리 수입지출관리대장.xlsx</strong><small>공식 원본 양식 · {ACCOUNT_LABELS.primary}/{ACCOUNT_LABELS.dues_intake} 2개 시트</small></span><b>1개</b></div>
                 <div><Landmark size={20} /><span><strong>동아리 계좌 전체내역.docx</strong><small>토스뱅크와 기업은행 전체내역 일괄 포함</small></span><b>1개</b></div>
-                <div><ReceiptText size={20} /><span><strong>영수증 및 소명자료</strong><small>운영계좌 1개 · 회비입금계좌 1개로 완전 분리</small></span><b>2개</b></div>
+                <div><ReceiptText size={20} /><span><strong>영수증 및 소명자료</strong><small>{ACCOUNT_LABELS.primary} 1개 · {ACCOUNT_LABELS.dues_intake} 1개로 완전 분리</small></span><b>2개</b></div>
                 <div><Archive size={20} /><span><strong>원본자료·검증 리포트·manifest</strong><small>계좌별 원본 폴더와 무결성 정보 포함</small></span><b>포함</b></div>
               </div>
             </section>

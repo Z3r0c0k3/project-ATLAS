@@ -1089,7 +1089,7 @@ def create_submission_package(
 ) -> PackageJobResponse:
     combined = bool(payload.primary_snapshot_id or payload.dues_snapshot_id)
     if combined and not (payload.primary_snapshot_id and payload.dues_snapshot_id):
-        raise HTTPException(status_code=422, detail="통합 동연 패키지에는 운영계좌와 회비입금계좌 스냅샷이 모두 필요합니다.")
+        raise HTTPException(status_code=422, detail="통합 동연 패키지에는 동아리운영계좌(토스뱅크)와 회비입금계좌(IBK기업은행) 스냅샷이 모두 필요합니다.")
     if combined:
         snapshots = {
             "primary": store.get("ledger_snapshots", payload.primary_snapshot_id),

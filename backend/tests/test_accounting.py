@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 from PIL import Image
 
 from app.services.accounting import CARD_EVIDENCE_METHODS, Evidence, Transaction, public_monthly_summary, validate_ledger
-from app.services.documents import build_combined_submission_package, build_submission_package
+from app.services.documents import build_combined_submission_package, build_submission_package, generate_evidence_document
 
 
 class AccountingValidationTest(unittest.TestCase):
@@ -99,6 +99,29 @@ class AccountingValidationTest(unittest.TestCase):
 
 
 class PackageGenerationTest(unittest.TestCase):
+    def test_evidence_document_marks_cancelled_payments_as_negative_expense(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            card_receipt = root / "#1# card-cancel.png"
+            interest_receipt = root / "#2# interest-cancel.png"
+            for path in (card_receipt, interest_receipt):
+                Image.new("RGB", (640, 420), "white").save(path)
+            transactions = [
+                Transaction(1, "2026-03-01", "카드 승인 취소", 10_000, 0, 100_000, processing_method="카드결제취소"),
+                Transaction(2, "2026-03-02", "이자 입금 취소", 500, 0, 99_500, processing_method="이자입금취소"),
+            ]
+            evidence = [
+                Evidence("card-cancel", 1, card_receipt.name, "receipt", local_path=str(card_receipt)),
+                Evidence("interest-cancel", 2, interest_receipt.name, "explanation", local_path=str(interest_receipt)),
+            ]
+            output_path = root / "evidence.docx"
+
+            generate_evidence_document(output_path, "Aegis", "회계", "검토", transactions, evidence)
+            document = Document(output_path)
+
+        self.assertEqual(document.tables[0].cell(4, 2).text, "-10,000원")
+        self.assertEqual(document.tables[0].cell(9, 2).text, "-500원")
+
     def test_combined_package_separates_same_number_transactions_by_account(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -153,25 +176,27 @@ class PackageGenerationTest(unittest.TestCase):
             )
             package_dir = root / "pkg-combined"
             workbook = load_workbook(package_dir / "동아리 수입지출관리대장.xlsx", data_only=False)
-            primary_document = Document(package_dir / "영수증 및 소명자료 - 동아리운영계좌.docx")
-            dues_document = Document(package_dir / "영수증 및 소명자료 - 회비입금계좌.docx")
+            primary_document = Document(package_dir / "영수증 및 소명자료 - 동아리운영계좌(토스뱅크).docx")
+            dues_document = Document(package_dir / "영수증 및 소명자료 - 회비입금계좌(IBK기업은행).docx")
             account_document = Document(package_dir / "동아리 계좌 전체내역.docx")
             with zipfile.ZipFile(result["zip_path"]) as archive:
                 names = set(archive.namelist())
 
-        self.assertEqual(workbook.sheetnames, ["운영계좌", "회비입금계좌"])
-        self.assertEqual(workbook["운영계좌"]["G10"].value, "운영계좌 카드결제")
-        self.assertEqual(workbook["회비입금계좌"]["G10"].value, "회비계좌 카드결제")
+        self.assertEqual(workbook.sheetnames, ["동아리운영계좌(토스뱅크)", "회비입금계좌(IBK기업은행)"])
+        self.assertEqual(workbook["동아리운영계좌(토스뱅크)"]["G10"].value, "운영계좌 카드결제")
+        self.assertEqual(workbook["회비입금계좌(IBK기업은행)"]["G10"].value, "회비계좌 카드결제")
         self.assertIn("운영계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
         self.assertNotIn("회비계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
         self.assertIn("회비계좌 카드결제", "\n".join(cell.text for table in dues_document.tables for row in table.rows for cell in row.cells))
         self.assertGreaterEqual(len(account_document.inline_shapes), 4)
+        self.assertEqual(len(account_document.tables[0].cell(0, 0).paragraphs), 1)
+        self.assertEqual(len(account_document.tables[0].cell(0, 1).paragraphs), 1)
         self.assertEqual(result["document_coverage"]["account_document"]["generated_bank_pages"], 2)
         self.assertEqual(result["validation"]["status"], "PASS")
         self.assertIn("동아리 계좌 전체내역.docx", names)
         self.assertIn("동아리 수입지출관리대장.xlsx", names)
-        self.assertIn("영수증 및 소명자료 - 동아리운영계좌.docx", names)
-        self.assertIn("영수증 및 소명자료 - 회비입금계좌.docx", names)
+        self.assertIn("영수증 및 소명자료 - 동아리운영계좌(토스뱅크).docx", names)
+        self.assertIn("영수증 및 소명자료 - 회비입금계좌(IBK기업은행).docx", names)
 
     def test_submission_report_marks_missing_card_evidence_as_error(self) -> None:
         transactions = [
