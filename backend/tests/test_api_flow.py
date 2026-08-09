@@ -34,9 +34,8 @@ class ApiWorkflowTest(unittest.TestCase):
         main.store = JsonStore(Path(self.temp.name))
         main.jobs = JobRunner(main.store, workers=1)
         self.client = TestClient(main.app)
-        response = self.client.post("/auth/login", json={"username": "admin", "role": "admin"})
-        self.assertEqual(response.status_code, 200)
-        self.headers = {"X-ATLAS-Token": response.json()["token"]}
+        session = main.store.insert("sessions", {"username": "test-admin", "role": "admin"}, "sess")
+        self.headers = {"X-ATLAS-Token": session["id"]}
 
     def tearDown(self) -> None:
         main.jobs.executor.shutdown(wait=True)
@@ -202,6 +201,43 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertEqual(replay.status_code, 409)
         self.assertTrue(self.client.get("/auth/google/status", headers=self.headers).json()["connected"])
         self.assertFalse(self.client.post("/auth/google/disconnect", headers=self.headers).json()["connected"])
+
+    def test_google_login_whitelist_and_role_revocation(self) -> None:
+        redirect_uri = "https://atlas.example.com/"
+        with patch.object(main, "ADMIN_EMAIL", "owner@example.com"), patch.dict(os.environ, {"GOOGLE_CLIENT_ID": "test-client"}):
+            prepared = self.client.get("/auth/google/login-url", params={"redirect_uri": redirect_uri})
+            self.assertEqual(prepared.status_code, 200)
+            with patch("app.main.exchange_authorization_code", return_value={"access_token": "access"}), patch(
+                "app.main.google_account_email", return_value="Owner@Example.com"
+            ):
+                logged_in = self.client.post(
+                    "/auth/google/login",
+                    json={"authorization_code": "code", "redirect_uri": redirect_uri, "state": prepared.json()["state"]},
+                )
+
+            self.assertEqual(logged_in.status_code, 200)
+            self.assertEqual(logged_in.json()["role"], "admin")
+            owner_headers = {"X-ATLAS-Token": logged_in.json()["token"]}
+            added = self.client.post(
+                "/settings/access-members",
+                headers=owner_headers,
+                json={"email": "reviewer@example.com", "role": "reviewer"},
+            )
+            self.assertEqual(added.status_code, 200)
+
+            reviewer_prepared = self.client.get("/auth/google/login-url", params={"redirect_uri": redirect_uri})
+            with patch("app.main.exchange_authorization_code", return_value={"access_token": "reviewer-access"}), patch(
+                "app.main.google_account_email", return_value="reviewer@example.com"
+            ):
+                reviewer_login = self.client.post(
+                    "/auth/google/login",
+                    json={"authorization_code": "code-2", "redirect_uri": redirect_uri, "state": reviewer_prepared.json()["state"]},
+                )
+            reviewer_headers = {"X-ATLAS-Token": reviewer_login.json()["token"]}
+            self.assertEqual(self.client.get("/auth/me", headers=reviewer_headers).status_code, 200)
+
+            self.client.delete(f"/settings/access-members/{added.json()['id']}", headers=owner_headers)
+            self.assertEqual(self.client.get("/auth/me", headers=reviewer_headers).status_code, 403)
 
     def test_google_api_refreshes_an_expired_access_token(self) -> None:
         connection = main.store.insert(

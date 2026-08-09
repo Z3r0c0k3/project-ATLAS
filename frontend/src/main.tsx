@@ -18,8 +18,11 @@ import {
   RotateCcw,
   Search,
   Send,
+  Settings,
   ShieldCheck,
+  Trash2,
   Upload,
+  UserPlus,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -31,9 +34,11 @@ const PERIOD_END = `${CURRENT_YEAR}-12-31`;
 const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
 
 type AccountId = "primary" | "dues_intake";
-type RouteId = "package" | "ledger" | "snapshots" | "public-report";
+type RouteId = "package" | "ledger" | "snapshots" | "public-report" | "settings";
 type ToastState = { kind: "loading" | "success" | "error"; title: string; detail?: string };
 type Runner = <T>(label: string, action: () => Promise<T>) => Promise<T | undefined>;
+type Role = "admin" | "accountant" | "president" | "reviewer";
+type Session = { token: string; username: string; email: string; role: Role; expires_at: string };
 
 type Transaction = {
   transaction_id?: string;
@@ -63,11 +68,17 @@ const ACCOUNT_LABELS: Record<AccountId, string> = {
   primary: "동아리운영계좌(토스뱅크)",
   dues_intake: "회비입금계좌(IBK기업은행)",
 };
+const ROLE_LABELS: Record<Role, string> = {
+  admin: "관리자",
+  president: "회장",
+  accountant: "총무",
+  reviewer: "검토자",
+};
 
 function routeFromPath(): RouteId {
   const segment = window.location.pathname.split("/").filter(Boolean)[0];
   if (segment === "monthly") return "public-report";
-  return segment === "ledger" || segment === "snapshots" || segment === "public-report" ? segment : "package";
+  return segment === "package" || segment === "snapshots" || segment === "public-report" || segment === "settings" ? segment : "ledger";
 }
 
 function previousMonthValue(): string {
@@ -193,14 +204,16 @@ function useWorkspace(token: string, run: Runner) {
     const code = params.get("code");
     const state = params.get("state");
     if (!code || !state) return;
+    if (sessionStorage.getItem("atlas_oauth_flow") !== "connection") return;
     const redirectUri = `${window.location.origin}/`;
     run("Google 계정 연결", () => api<any>("/auth/google/connect", token, {
       method: "POST",
       body: JSON.stringify({ authorization_code: code, state, redirect_uri: redirectUri }),
     })).then((result) => {
       if (result) setGoogleConnection(result);
-      const returnPath = sessionStorage.getItem("atlas_google_return_path") || "/package";
+      const returnPath = sessionStorage.getItem("atlas_google_return_path") || "/ledger";
       sessionStorage.removeItem("atlas_google_return_path");
+      sessionStorage.removeItem("atlas_oauth_flow");
       window.location.replace(returnPath);
     });
   }, [run, token]);
@@ -208,6 +221,7 @@ function useWorkspace(token: string, run: Runner) {
   async function connectGoogle() {
     const redirectUri = `${window.location.origin}/`;
     sessionStorage.setItem("atlas_google_return_path", window.location.pathname);
+    sessionStorage.setItem("atlas_oauth_flow", "connection");
     const result = await run("Google 연결 준비", () => api<any>(`/auth/google/authorize-url?redirect_uri=${encodeURIComponent(redirectUri)}`, token));
     if (result?.authorization_url) window.location.assign(result.authorization_url);
   }
@@ -337,7 +351,7 @@ function LedgerPage({ token, run }: { token: string; run: Runner }) {
   }
 
   return <>
-    <PageHeading eyebrow="LEDGER & EVIDENCE" title="장부·증빙" description="원본 장부를 연결하고 계좌 거래내역과 증빙을 매칭합니다." />
+    <PageHeading eyebrow="LEDGER & EVIDENCE" title="장부/증빙" description="원본 장부를 연결하고 계좌 거래내역과 증빙을 매칭합니다." />
     <section className="period-strip">
       <label>시작일<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
       <label>종료일<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
@@ -634,12 +648,49 @@ function PublicReport() {
   return <main className="public-shell"><header className="public-heading"><div className="brand"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>{report.club_name}</p><h1>{report.month} 회계 투명성 자료</h1></div></div><span className="verified"><ShieldCheck size={16} /> ATLAS 공개본</span></header><section className="public-metrics"><div><span>수입</span><strong>{money(report.summary.total_income)}</strong></div><div><span>지출</span><strong>{money(report.summary.total_expense)}</strong></div><div><span>잔액</span><strong>{money(report.summary.closing_balance)}</strong></div><div><span>거래</span><strong>{report.summary.transaction_count}건</strong></div></section><section className="panel transaction-panel"><div className="panel-heading"><h3>거래 내역</h3></div><TransactionTable rows={report.transactions} /></section></main>;
 }
 
+function SettingsPage({ token, run }: { token: string; run: Runner }) {
+  const [members, setMembers] = useState<any[]>([]);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<Role>("reviewer");
+
+  const load = useCallback(() => api<any[]>("/settings/access-members", token).then(setMembers), [token]);
+  useEffect(() => { load().catch(() => undefined); }, [load]);
+
+  async function saveMember() {
+    const result = await run("접근 권한 저장", () => api<any>("/settings/access-members", token, {
+      method: "POST",
+      body: JSON.stringify({ email, role }),
+    }));
+    if (result) {
+      setEmail("");
+      await load();
+    }
+  }
+
+  async function removeMember(member: any) {
+    const result = await run("접근 권한 삭제", () => api<any>(`/settings/access-members/${member.id}`, token, { method: "DELETE" }));
+    if (result) await load();
+  }
+
+  return <>
+    <PageHeading eyebrow="ACCESS CONTROL" title="설정" description="ATLAS에 로그인할 Google 계정과 역할을 관리합니다." />
+    <section className="panel access-settings">
+      <div className="panel-heading"><div><h3>이메일 화이트리스트</h3><p className="muted">등록된 계정만 Google 로그인 후 권한 범위 안에서 작업할 수 있습니다.</p></div></div>
+      <div className="access-add-row">
+        <label>Google 계정 이메일<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="member@example.com" /></label>
+        <label>역할<select value={role} onChange={(event) => setRole(event.target.value as Role)}>{Object.entries(ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <button disabled={!email.trim()} onClick={() => saveMember().catch(() => undefined)}><UserPlus size={16} /> 추가 또는 변경</button>
+      </div>
+      <div className="table-scroll"><table><thead><tr><th>이메일</th><th>역할</th><th>관리 방식</th><th>작업</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td>{member.email}</td><td>{ROLE_LABELS[member.role as Role] || member.role}</td><td>{member.source === "environment" ? ".env 최초 관리자" : "웹 설정"}</td><td><button className="icon-button" disabled={member.source === "environment"} title="화이트리스트에서 삭제" aria-label={`${member.email} 권한 삭제`} onClick={() => removeMember(member).catch(() => undefined)}><Trash2 size={15} /></button></td></tr>)}{!members.length && <tr><td className="empty-row" colSpan={4}>등록된 계정이 없습니다.</td></tr>}</tbody></table></div>
+    </section>
+  </>;
+}
+
 function App() {
   const route = routeFromPath();
-  const [username, setUsername] = useState(() => sessionStorage.getItem("atlas_username") || "aegis-admin");
-  const [role, setRole] = useState(() => sessionStorage.getItem("atlas_role") || "admin");
-  const [password, setPassword] = useState("");
   const [token, setToken] = useState(() => sessionStorage.getItem("atlas_token") || "");
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
@@ -660,23 +711,71 @@ function App() {
     }
   }, []);
 
-  async function login() {
-    const session = await run("로그인", () => api<any>("/auth/login", undefined, { method: "POST", body: JSON.stringify({ username, role, password: password || null }) }));
-    if (!session?.token) return;
-    sessionStorage.setItem("atlas_token", session.token);
-    sessionStorage.setItem("atlas_username", session.username);
-    sessionStorage.setItem("atlas_role", session.role);
-    setToken(session.token); setUsername(session.username); setRole(session.role);
+  const storeSession = useCallback((next: Session) => {
+    sessionStorage.setItem("atlas_token", next.token);
+    setToken(next.token);
+    setSession(next);
+  }, []);
+
+  const clearSession = useCallback(() => {
+    sessionStorage.removeItem("atlas_token");
+    sessionStorage.removeItem("atlas_oauth_flow");
+    setToken("");
+    setSession(null);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    if (token) {
+      api<Session>("/auth/me", token).then(setSession).catch(clearSession).finally(() => setAuthReady(true));
+      return;
+    }
+    if (code && state && sessionStorage.getItem("atlas_oauth_flow") === "login") {
+      const redirectUri = `${window.location.origin}/`;
+      run("Google 로그인", () => api<Session>("/auth/google/login", undefined, {
+        method: "POST",
+        body: JSON.stringify({ authorization_code: code, state, redirect_uri: redirectUri }),
+      })).then((next) => {
+        if (!next) {
+          setAuthReady(true);
+          return;
+        }
+        sessionStorage.removeItem("atlas_oauth_flow");
+        storeSession(next);
+        window.location.replace("/ledger");
+      });
+      return;
+    }
+    setAuthReady(true);
+  }, [clearSession, run, storeSession, token]);
+
+  async function beginLogin() {
+    const redirectUri = `${window.location.origin}/`;
+    sessionStorage.setItem("atlas_oauth_flow", "login");
+    const result = await run("Google 로그인 준비", () => api<any>(`/auth/google/login-url?redirect_uri=${encodeURIComponent(redirectUri)}`));
+    if (result?.authorization_url) window.location.assign(result.authorization_url);
+  }
+
+  async function logout() {
+    if (token) await api("/auth/logout", token, { method: "POST" }).catch(() => undefined);
+    clearSession();
+    window.location.replace("/ledger");
   }
 
   const tabs: Array<{ id: RouteId; href: string; label: string; icon: React.ReactNode }> = [
+    { id: "ledger", href: "/ledger", label: "장부/증빙", icon: <BookOpenCheck size={17} /> },
     { id: "package", href: "/package", label: "동연 패키지", icon: <FileArchive size={17} /> },
-    { id: "ledger", href: "/ledger", label: "장부·증빙", icon: <BookOpenCheck size={17} /> },
-    { id: "snapshots", href: "/snapshots", label: "스냅샷 관리", icon: <History size={17} /> },
     { id: "public-report", href: "/public-report", label: "월간 공개", icon: <Link2 size={17} /> },
+    { id: "snapshots", href: "/snapshots", label: "스냅샷 관리", icon: <History size={17} /> },
   ];
+  if (session?.role === "admin") tabs.push({ id: "settings", href: "/settings", label: "설정", icon: <Settings size={17} /> });
 
-  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/package"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>ATLAS</p><h1>Aegis 회계 자동화</h1></div></a><div className="session-state"><span className={`dot ${token ? "online" : ""}`} />{token ? `${username} · ${role}` : "로그인 필요"}</div></header>{!token ? <section className="login-surface"><div><p className="eyebrow">ACCOUNTING OPERATIONS</p><h2>회계 작업을 시작합니다</h2><p>권한이 부여된 Aegis 운영 계정으로 로그인하세요.</p></div><div className="login-form"><label>사용자<input value={username} onChange={(event) => setUsername(event.target.value)} /></label><label>역할<select value={role} onChange={(event) => setRole(event.target.value)}><option value="admin">관리자</option><option value="accountant">회계담당자</option><option value="president">회장</option><option value="reviewer">검토자</option></select></label><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button onClick={login}><LockKeyhole size={17} /> 로그인</button></div></section> : <><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={route === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{route === "ledger" ? <LedgerPage token={token} run={run} /> : route === "snapshots" ? <SnapshotManagementPage token={token} run={run} /> : route === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></>}</main>;
+  if (!authReady) return <main className="login-page"><LoaderCircle className="spin" size={28} /></main>;
+  if (!token || !session) return <main className="login-page"><Toast toast={toast} onClose={() => setToast(null)} /><section className="login-card"><img src="/aegis-logo.svg" alt="Aegis" /><h1>Aegis ATLAS 로그인</h1><p>권한이 부여된 Aegis 운영 계정만 접근할 수 있습니다.</p><button onClick={() => beginLogin().catch(() => undefined)}><ExternalLink size={16} /> Google 계정으로 로그인</button></section></main>;
+  const activeRoute = route === "settings" && session.role !== "admin" ? "ledger" : route;
+  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/ledger"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>Aegis ATLAS</p><h1>Aegis Transaction Ledger &amp; Accounting System</h1></div></a><div className="session-state"><span><span className="dot online" />{session.email} · {ROLE_LABELS[session.role]}</span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => logout().catch(() => undefined)}><LogOut size={15} /></button></div></header><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={activeRoute === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{activeRoute === "ledger" ? <LedgerPage token={token} run={run} /> : activeRoute === "snapshots" ? <SnapshotManagementPage token={token} run={run} /> : activeRoute === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : activeRoute === "settings" ? <SettingsPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></main>;
 }
 
 const root = createRoot(document.getElementById("root")!);

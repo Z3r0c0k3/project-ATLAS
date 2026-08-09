@@ -37,12 +37,13 @@ docker compose up --build
 - API 문서: <http://localhost:5173/api/docs>
 - 상태 확인: <http://localhost:5173/api/health>
 
-로컬 기본값은 데모 로그인 모드이므로 비밀번호를 비워둘 수 있다. 외부에 공개할 때는
-반드시 `ATLAS_LOGIN_PASSWORD`를 설정해야 한다.
+로그인은 Google OAuth로 처리한다. 로컬에서도 `.env`에 `ATLAS_ADMIN_EMAIL`,
+`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`을 설정하고 Google Cloud OAuth 리디렉션 URI에
+`http://localhost:5173/`를 등록해야 한다.
 
 ## 화면 테스트 순서
 
-1. `관리자` 역할로 로그인한다.
+1. `.env`에 등록한 관리자 Google 계정으로 로그인한다.
 2. `장부·증빙`에서 두 Google 장부를 연결한다.
 3. 계좌 거래내역과 영수증·소명자료·계좌 캡처를 업로드한다.
 4. 거래 목록에서 두 계좌가 분리되어 표시되고 증빙 돋보기로 원본이 열리는지 확인한다.
@@ -128,8 +129,8 @@ npm audit --audit-level=moderate
 - `ATLAS_DOMAIN`: 프론트엔드 공개 도메인, 예: `atlas.dkuaegis.org`
 - `ATLAS_API_DOMAIN`: 백엔드 공개 도메인, 예: `atlas-api.dkuaegis.org`
 - `ATLAS_SECRET_KEY`: OAuth와 Webhook 암호화용 긴 난수
-- `ATLAS_LOGIN_PASSWORD`: 운영 화면 로그인 비밀번호
-- `ATLAS_USER_ROLES`: 사용자명과 역할을 연결한 JSON 객체
+- `ATLAS_ADMIN_EMAIL`: 최초 관리자 Google 계정 이메일
+- `ATLAS_SESSION_HOURS`: 로그인 세션 유효시간, 기본 12시간
 - `PUBLIC_FRONTEND_BASE_URL`, `CORS_ORIGINS`: 실제 HTTPS 주소
 
 안전한 난수는 다음처럼 만들 수 있다.
@@ -173,9 +174,12 @@ Google Cloud Console에서 OAuth 클라이언트를 만들고 `.env`에 `GOOGLE_
 승인된 리디렉션 URI에는 로컬 테스트용 `http://localhost:5173/`와 운영 주소
 `https://<ATLAS_DOMAIN>/`를 등록한다. 백엔드 도메인 `https://<ATLAS_API_DOMAIN>/`는
 Google OAuth 리디렉션 URI가 아니라 API 호출과 CORS 대상이다.
-ATLAS는 장부 읽기와 월별 공개 시트 생성·공유를 위해 Sheets/Drive 쓰기 Scope를 요청한다.
+ATLAS 로그인은 `openid`, `email` Scope만 요청한다. 로그인 후 장부 연결 버튼에서 진행하는
+별도 OAuth는 장부 읽기와 월별 공개 시트 생성·공유를 위해 Sheets/Drive 쓰기 Scope를 요청한다.
 월별 공개 대상 Spreadsheet는 파일 전체가 링크 공개되므로, 다른 내부 자료가 없는 공개 전용 파일을 사용한다.
-OAuth `state`는 로그인 세션에 묶고 한 번 사용하면 폐기한다. 이전 읽기 전용 연결이
+로그인 화이트리스트는 `.env`의 최초 관리자와 `설정` 페이지에서 관리한다. 역할은 관리자,
+회장, 총무, 검토자이며 삭제 또는 역할 변경은 다음 API 요청부터 즉시 반영된다.
+OAuth `state`는 로그인 흐름에 묶고 한 번 사용하면 폐기한다. 이전 읽기 전용 연결이
 저장되어 있다면 화면에서 연결 해제 후 다시 연결해야 한다.
 
 OAuth 클라이언트가 속한 Google Cloud 프로젝트에서는 다음 API를 반드시 활성화한다.
@@ -191,6 +195,13 @@ Google Drive API를 Enable하고 몇 분 뒤 다시 시도한다.
 리디렉션 URI보다 Cloudflare Tunnel의 `api.<도메인>` 라우팅과 백엔드 컨테이너 상태를
 먼저 확인한다.
 
+- `GET /auth/google/login-url`
+- `POST /auth/google/login`
+- `GET /auth/me`
+- `POST /auth/logout`
+- `GET /settings/access-members`
+- `POST /settings/access-members`
+- `DELETE /settings/access-members/{member_id}`
 - `GET /auth/google/authorize-url`
 - `POST /auth/google/connect`
 - `GET /auth/google/status`

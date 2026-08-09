@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import secrets
@@ -15,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .models import (
     AcknowledgeIssuesRequest,
+    AccessMemberRequest,
     AuthSession,
     BankAttachRequest,
     DiscordMessageResponse,
@@ -26,7 +26,7 @@ from .models import (
     GoogleSheetSnapshotRequest,
     GoogleSheetUrlSnapshotRequest,
     LedgerSnapshotRequest,
-    LoginRequest,
+    GoogleLoginRequest,
     MonthlyReportRequest,
     MonthlyReportResponse,
     PackageJobResponse,
@@ -50,6 +50,7 @@ from .services.documents import build_combined_submission_package, build_monthly
 from .services.google import (
     GoogleApiError,
     build_authorization_url,
+    build_login_authorization_url,
     exchange_authorization_code,
     get_sheet_values,
     google_account_email,
@@ -81,14 +82,11 @@ OUTPUT_ROOT = DATA_ROOT / "outputs"
 MAX_UPLOAD_BYTES = int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 PUBLIC_FRONTEND_BASE_URL = os.getenv("PUBLIC_FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
-LOGIN_PASSWORD = os.getenv("ATLAS_LOGIN_PASSWORD")
+ADMIN_EMAIL = os.getenv("ATLAS_ADMIN_EMAIL", "").strip().lower()
+SESSION_HOURS = int(os.getenv("ATLAS_SESSION_HOURS", "12"))
 DEFAULT_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_LEDGER_SHEET_URL", "")
 DEFAULT_DUES_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_DUES_LEDGER_SHEET_URL", "")
 DEFAULT_MONTHLY_PUBLIC_SHEET_URL = os.getenv("ATLAS_DEFAULT_MONTHLY_PUBLIC_SHEET_URL", "")
-try:
-    USER_ROLES = json.loads(os.getenv("ATLAS_USER_ROLES", "{}"))
-except json.JSONDecodeError as exc:
-    raise RuntimeError("ATLAS_USER_ROLES must be a valid JSON object") from exc
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -111,16 +109,44 @@ secret_box = SecretBox()
 jobs = JobRunner(store)
 
 
+def normalize_email(value: str) -> str:
+    email = value.strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(status_code=422, detail="올바른 이메일 주소를 입력해주세요.")
+    return email
+
+
+def access_member(email: str) -> dict | None:
+    email = email.strip().lower()
+    if ADMIN_EMAIL and email == ADMIN_EMAIL:
+        return {"id": "environment-admin", "email": email, "role": Role.admin.value, "active": True, "source": "environment"}
+    member = store.find_one_by("access_members", "email", email)
+    if not member or not member.get("active", True):
+        return None
+    return {**member, "source": "settings"}
+
+
+def session_expired(session: dict) -> bool:
+    expires_at = session.get("expires_at")
+    if not expires_at:
+        return False
+    return datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+
+
 def require_roles(*allowed_roles: Role):
     def dependency(x_atlas_token: str | None = Header(default=None, alias="X-ATLAS-Token")) -> dict:
         if not x_atlas_token:
             raise HTTPException(status_code=401, detail="Missing ATLAS session token")
         session = store.get("sessions", x_atlas_token)
-        if not session:
+        if not session or session_expired(session):
             raise HTTPException(status_code=401, detail="Invalid ATLAS session token")
-        if session["role"] not in {role.value for role in allowed_roles}:
+        member = access_member(session.get("email", "")) if session.get("email") else None
+        if session.get("email") and not member:
+            raise HTTPException(status_code=403, detail="ATLAS access has been revoked")
+        effective = {**session, "role": member["role"]} if member else session
+        if effective["role"] not in {role.value for role in allowed_roles}:
             raise HTTPException(status_code=403, detail="Role is not allowed for this operation")
-        return session
+        return effective
 
     return dependency
 
@@ -553,7 +579,8 @@ def health() -> dict:
         "status": "ok",
         "service": "ATLAS",
         "version": app.version,
-        "auth_mode": "mapped_password" if LOGIN_PASSWORD and USER_ROLES else ("password" if LOGIN_PASSWORD else "demo"),
+        "auth_mode": "google_oauth",
+        "admin_configured": bool(ADMIN_EMAIL),
     }
 
 
@@ -568,23 +595,116 @@ def get_config_defaults(
     }
 
 
-@app.post("/auth/login", response_model=AuthSession)
-def login(payload: LoginRequest, request: Request) -> AuthSession:
-    if LOGIN_PASSWORD and not secrets.compare_digest(payload.password or "", LOGIN_PASSWORD):
-        raise HTTPException(status_code=401, detail="Invalid login password")
-    if USER_ROLES:
-        mapped_role = USER_ROLES.get(payload.username)
-        if not mapped_role:
-            raise HTTPException(status_code=403, detail="User is not registered in ATLAS_USER_ROLES")
-        try:
-            effective_role = Role(mapped_role)
-        except ValueError as exc:
-            raise HTTPException(status_code=500, detail="Configured user role is invalid") from exc
-    else:
-        effective_role = payload.role
-    session = store.insert("sessions", {"username": payload.username, "role": effective_role.value}, "sess")
+@app.get("/auth/google/login-url")
+def google_login_url(redirect_uri: str) -> dict:
+    state_row = store.insert(
+        "oauth_states",
+        {
+            "flow": "login",
+            "redirect_uri": redirect_uri,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+        },
+        "state",
+    )
+    try:
+        return {"authorization_url": build_login_authorization_url(redirect_uri, state_row["id"]), "state": state_row["id"]}
+    except GoogleApiError as exc:
+        raise_google_http_error(exc)
+
+
+@app.post("/auth/google/login", response_model=AuthSession)
+def google_login(payload: GoogleLoginRequest, request: Request) -> AuthSession:
+    oauth_state = store.get("oauth_states", payload.state)
+    if not oauth_state or oauth_state.get("flow") != "login" or oauth_state.get("redirect_uri") != payload.redirect_uri:
+        raise HTTPException(status_code=400, detail="Invalid Google OAuth state")
+    if oauth_state.get("consumed_at"):
+        raise HTTPException(status_code=409, detail="Google OAuth state was already used")
+    if datetime.fromisoformat(oauth_state["expires_at"]) <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Google OAuth state has expired")
+    try:
+        tokens = exchange_authorization_code(payload.authorization_code, payload.redirect_uri)
+        email = normalize_email(google_account_email(tokens.get("access_token", "")))
+    except GoogleApiError as exc:
+        raise_google_http_error(exc)
+    store.update("oauth_states", oauth_state["id"], {"consumed_at": utc_now()})
+    member = access_member(email)
+    if not member:
+        raise HTTPException(status_code=403, detail="이 Google 계정은 ATLAS 사용 권한이 없습니다.")
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)).isoformat()
+    session = store.insert(
+        "sessions",
+        {"username": email, "email": email, "role": member["role"], "expires_at": expires_at},
+        "sess",
+    )
     audit(session, "auth.login", "session", session["id"], success=True, request=request)
-    return AuthSession(token=session["id"], username=payload.username, role=effective_role)
+    return AuthSession(token=session["id"], username=email, email=email, role=Role(member["role"]), expires_at=expires_at)
+
+
+@app.get("/auth/me", response_model=AuthSession)
+def auth_me(session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer))) -> AuthSession:
+    return AuthSession(
+        token=session["id"],
+        username=session["username"],
+        email=session.get("email", session["username"]),
+        role=Role(session["role"]),
+        expires_at=session.get("expires_at", ""),
+    )
+
+
+@app.post("/auth/logout")
+def logout(session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer))) -> dict:
+    store.delete("sessions", session["id"])
+    return {"logged_out": True}
+
+
+@app.get("/settings/access-members")
+def list_access_members(session: dict = Depends(require_roles(Role.admin))) -> list[dict]:
+    members = [
+        {**row, "source": "settings"}
+        for row in store.read_collection("access_members").values()
+        if row.get("email") != ADMIN_EMAIL
+    ]
+    if ADMIN_EMAIL:
+        members.insert(0, access_member(ADMIN_EMAIL))
+    return members
+
+
+@app.post("/settings/access-members")
+def save_access_member(
+    payload: AccessMemberRequest,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin)),
+) -> dict:
+    email = normalize_email(payload.email)
+    if ADMIN_EMAIL and email == ADMIN_EMAIL:
+        if payload.role != Role.admin:
+            raise HTTPException(status_code=422, detail=".env 관리자의 역할은 변경할 수 없습니다.")
+        return access_member(email)
+    existing = store.find_one_by("access_members", "email", email)
+    before = existing.copy() if existing else None
+    member = (
+        store.update("access_members", existing["id"], {"role": payload.role.value, "active": True})
+        if existing
+        else store.insert("access_members", {"email": email, "role": payload.role.value, "active": True}, "member")
+    )
+    audit(session, "settings.access-member.saved", "access_member", member["id"], before=before, after=member, request=request)
+    return {**member, "source": "settings"}
+
+
+@app.delete("/settings/access-members/{member_id}")
+def delete_access_member(
+    member_id: str,
+    request: Request,
+    session: dict = Depends(require_roles(Role.admin)),
+) -> dict:
+    if member_id == "environment-admin":
+        raise HTTPException(status_code=422, detail=".env 관리자는 삭제할 수 없습니다.")
+    member = store.get("access_members", member_id)
+    if not member:
+        raise HTTPException(status_code=404, detail="화이트리스트 사용자를 찾을 수 없습니다.")
+    deleted = store.delete("access_members", member_id)
+    audit(session, "settings.access-member.deleted", "access_member", member_id, before=deleted, request=request)
+    return {"deleted": True, "id": member_id}
 
 
 @app.get("/auth/google/authorize-url")
@@ -592,7 +712,7 @@ def google_authorize_url(
     redirect_uri: str,
     session: dict = Depends(require_roles(Role.admin, Role.accountant)),
 ) -> dict:
-    state_row = store.insert("oauth_states", {"session_id": session["id"], "redirect_uri": redirect_uri}, "state")
+    state_row = store.insert("oauth_states", {"flow": "connection", "session_id": session["id"], "redirect_uri": redirect_uri}, "state")
     try:
         return {"authorization_url": build_authorization_url(redirect_uri, state_row["id"]), "state": state_row["id"]}
     except GoogleApiError as exc:
@@ -610,7 +730,7 @@ def connect_google(
         if not payload.redirect_uri or not payload.state:
             raise HTTPException(status_code=422, detail="redirect_uri and state are required with authorization_code")
         oauth_state = store.get("oauth_states", payload.state)
-        if not oauth_state or oauth_state.get("session_id") != session["id"] or oauth_state.get("redirect_uri") != payload.redirect_uri:
+        if not oauth_state or oauth_state.get("flow") != "connection" or oauth_state.get("session_id") != session["id"] or oauth_state.get("redirect_uri") != payload.redirect_uri:
             raise HTTPException(status_code=400, detail="Invalid Google OAuth state")
         if oauth_state.get("consumed_at"):
             raise HTTPException(status_code=409, detail="Google OAuth state was already used")

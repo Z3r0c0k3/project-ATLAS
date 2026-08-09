@@ -160,8 +160,8 @@ class WorkbookApiTest(unittest.TestCase):
         main.UPLOAD_ROOT = self.root / "uploads"
         main.OUTPUT_ROOT = self.root / "outputs"
         self.client = TestClient(main.app)
-        response = self.client.post("/auth/login", json={"username": "admin", "role": "admin"})
-        self.headers = {"X-ATLAS-Token": response.json()["token"]}
+        session = main.store.insert("sessions", {"username": "test-admin", "role": "admin"}, "sess")
+        self.headers = {"X-ATLAS-Token": session["id"]}
 
     def tearDown(self) -> None:
         main.jobs.executor.shutdown(wait=True)

@@ -16,6 +16,7 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+GOOGLE_LOGIN_SCOPES = ["openid", "email"]
 
 
 class GoogleApiError(RuntimeError):
@@ -73,7 +74,7 @@ def google_account_email(access_token: str) -> str:
     return email
 
 
-def build_authorization_url(redirect_uri: str, state: str) -> str:
+def _build_authorization_url(redirect_uri: str, state: str, scopes: list[str], prompt: str, offline: bool = False) -> str:
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     if not client_id:
         raise GoogleApiError("GOOGLE_CLIENT_ID is not configured")
@@ -81,12 +82,21 @@ def build_authorization_url(redirect_uri: str, state: str) -> str:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": " ".join(GOOGLE_SHEETS_SCOPES),
-        "access_type": "offline",
-        "prompt": "consent",
+        "scope": " ".join(scopes),
+        "prompt": prompt,
         "state": state,
     }
+    if offline:
+        params["access_type"] = "offline"
     return f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+
+def build_authorization_url(redirect_uri: str, state: str) -> str:
+    return _build_authorization_url(redirect_uri, state, GOOGLE_SHEETS_SCOPES, "consent", offline=True)
+
+
+def build_login_authorization_url(redirect_uri: str, state: str) -> str:
+    return _build_authorization_url(redirect_uri, state, GOOGLE_LOGIN_SCOPES, "select_account")
 
 
 def _token_request(payload: dict) -> dict:

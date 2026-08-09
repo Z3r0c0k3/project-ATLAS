@@ -14,15 +14,22 @@ class Role(str, Enum):
     reviewer = "reviewer"
 
 
-class LoginRequest(BaseModel):
-    username: str = Field(min_length=1)
-    role: Role
-    password: str | None = None
+class GoogleLoginRequest(BaseModel):
+    authorization_code: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=1)
+    state: str = Field(min_length=1)
 
 
 class AuthSession(BaseModel):
     token: str
     username: str
+    email: str
+    role: Role
+    expires_at: str
+
+
+class AccessMemberRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
     role: Role
 
 
