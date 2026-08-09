@@ -150,8 +150,27 @@ def create_snapshot(
     source_type: str = "manual",
     source_extra: dict | None = None,
 ) -> dict:
-    transactions = normalize_transactions([item.model_dump() for item in payload.transactions])
-    evidence = normalize_evidence([item.model_dump() for item in payload.evidence])
+    evidence_rows = [item.model_dump() for item in payload.evidence]
+    mismatched_evidence = [item["id"] for item in evidence_rows if item.get("account_id", "primary") != payload.account_id]
+    if mismatched_evidence:
+        raise HTTPException(
+            status_code=422,
+            detail=f"다른 계좌의 증빙은 현재 장부에 연결할 수 없습니다: {', '.join(mismatched_evidence)}",
+        )
+    allowed_evidence_ids = {item["id"] for item in evidence_rows}
+    transaction_rows = []
+    for item in payload.transactions:
+        row = item.model_dump()
+        if row.get("account_id", "primary") != payload.account_id:
+            row["transaction_id"] = None
+            row["source_row_hash"] = None
+        row.update({"organization_id": payload.organization_id, "account_id": payload.account_id, "period": payload.period})
+        row["evidence_ids"] = [evidence_id for evidence_id in row.get("evidence_ids", []) if evidence_id in allowed_evidence_ids]
+        if row.get("evidence_id") not in allowed_evidence_ids:
+            row["evidence_id"] = None
+        transaction_rows.append(row)
+    transactions = normalize_transactions(transaction_rows)
+    evidence = normalize_evidence(evidence_rows)
     source = {
         "type": source_type,
         "spreadsheet_id": payload.spreadsheet_id,
@@ -219,8 +238,18 @@ def create_snapshot_revision(
     session: dict,
     mutation: dict,
 ) -> dict:
-    normalized_transactions = normalize_transactions(transactions)
-    normalized_evidence = normalize_evidence(evidence)
+    account_id = current["account_id"]
+    scoped_evidence = [item for item in evidence if item.get("account_id", "primary") == account_id]
+    allowed_evidence_ids = {item["id"] for item in scoped_evidence}
+    scoped_transactions = []
+    for item in transactions:
+        row = {**item, "organization_id": current["organization_id"], "account_id": account_id, "period": current["period"]}
+        row["evidence_ids"] = [evidence_id for evidence_id in row.get("evidence_ids", []) if evidence_id in allowed_evidence_ids]
+        if row.get("evidence_id") not in allowed_evidence_ids:
+            row["evidence_id"] = None
+        scoped_transactions.append(row)
+    normalized_transactions = normalize_transactions(scoped_transactions)
+    normalized_evidence = normalize_evidence(scoped_evidence)
     source = {**current.get("source", {}), "parent_snapshot_id": current["id"], "mutation": mutation}
     return store.insert(
         "ledger_snapshots",
@@ -245,6 +274,8 @@ def resolve_snapshot_for_package(payload: SubmissionPackageRequest, session: dic
         snapshot = store.get("ledger_snapshots", payload.snapshot_id)
         if not snapshot:
             raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+        if snapshot.get("account_id") != payload.account_id:
+            raise HTTPException(status_code=409, detail="선택한 계좌와 장부 스냅샷의 계좌가 다릅니다.")
         return snapshot
     if not payload.transactions:
         raise HTTPException(status_code=422, detail="Transactions are required when snapshot_id is omitted")
@@ -774,6 +805,8 @@ def create_workbook_snapshot(
         item = store.get("evidence", evidence_id)
         if not item:
             raise HTTPException(status_code=404, detail=f"Evidence not found: {evidence_id}")
+        if item.get("account_id", "primary") != payload.account_id:
+            raise HTTPException(status_code=422, detail=f"다른 계좌의 증빙은 현재 장부에 연결할 수 없습니다: {evidence_id}")
         evidence_rows.append(item)
     evidence_by_number: dict[int, list[str]] = {}
     for item in evidence_rows:
@@ -986,6 +1019,8 @@ def attach_snapshot_evidence(
         item = store.get("evidence", evidence_id)
         if not item:
             raise HTTPException(status_code=404, detail=f"Evidence not found: {evidence_id}")
+        if item.get("account_id", "primary") != current["account_id"]:
+            raise HTTPException(status_code=422, detail=f"다른 계좌의 증빙은 현재 장부에 연결할 수 없습니다: {evidence_id}")
         evidence_by_id[evidence_id] = item
 
     transactions = [dict(item) for item in current["transactions"]]

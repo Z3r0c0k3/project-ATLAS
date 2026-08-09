@@ -14,6 +14,7 @@ from ..services.workbooks import parse_ibk_bank_pdf
 TRANSACTION_TYPE_MAP = {
     "스마트뱅킹": "계좌이체",
     "타행이체": "계좌이체",
+    "펌뱅킹": "계좌이체",
     "이자": "이자입금",
 }
 
@@ -111,7 +112,7 @@ def ibk_pdf_to_aegis_ledger(
         withdrawal = tx["withdrawal"]
         running_balance = running_balance + deposit - withdrawal
 
-        tx_type = tx.get("transaction_type", "")
+        tx_type = "".join(tx.get("transaction_type", "").split())
         processing_method = TRANSACTION_TYPE_MAP.get(tx_type, "")
 
         counterparty = tx.get("counterparty_name", "") or tx.get("description", "")

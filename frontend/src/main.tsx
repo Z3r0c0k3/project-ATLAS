@@ -26,6 +26,11 @@ import "./styles.css";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/+$/, "");
 const JOB_MAX_WAIT_MS = 30 * 60 * 1000;
+const CURRENT_YEAR = new Date().getFullYear();
+const DEFAULT_PERIOD_START = `${CURRENT_YEAR}-01-01`;
+const DEFAULT_PERIOD_END = `${CURRENT_YEAR}-12-31`;
+
+type AccountId = "primary" | "dues_intake";
 
 type TransactionInput = {
   transaction_id?: string;
@@ -143,10 +148,14 @@ function App() {
   const [clubName, setClubName] = useState("Aegis");
   const [semester, setSemester] = useState("2026년 1학기");
   const [month, setMonth] = useState("2026년 3월");
-  const [periodStart, setPeriodStart] = useState("2026-03-01");
-  const [periodEnd, setPeriodEnd] = useState("2026-06-30");
-  const [openingBalance, setOpeningBalance] = useState(1000000);
-  const [expectedClosingBalance, setExpectedClosingBalance] = useState(1080400);
+  const [primaryPeriodStart, setPrimaryPeriodStart] = useState(DEFAULT_PERIOD_START);
+  const [primaryPeriodEnd, setPrimaryPeriodEnd] = useState(DEFAULT_PERIOD_END);
+  const [primaryOpeningBalance, setPrimaryOpeningBalance] = useState(0);
+  const [primaryExpectedClosingBalance, setPrimaryExpectedClosingBalance] = useState(0);
+  const [duesPeriodStart, setDuesPeriodStart] = useState(DEFAULT_PERIOD_START);
+  const [duesPeriodEnd, setDuesPeriodEnd] = useState(DEFAULT_PERIOD_END);
+  const [duesOpeningBalance, setDuesOpeningBalance] = useState(0);
+  const [duesExpectedClosingBalance, setDuesExpectedClosingBalance] = useState(0);
   const [treasurerName, setTreasurerName] = useState("회계담당자");
   const [presidentName, setPresidentName] = useState("회장");
   const [reviewerName, setReviewerName] = useState("검토자");
@@ -156,14 +165,17 @@ function App() {
   const [primaryEvidence, setPrimaryEvidence] = useState<EvidenceInput[]>([]);
   const [duesTransactions, setDuesTransactions] = useState<TransactionInput[]>([]);
   const [duesEvidence, setDuesEvidence] = useState<EvidenceInput[]>([]);
-  const [ledgerUpload, setLedgerUpload] = useState<any>(null);
-  const [bankUpload, setBankUpload] = useState<any>(null);
-  const [ledgerAccountId, setLedgerAccountId] = useState<"primary" | "dues_intake">("primary");
-  const [evidenceUploads, setEvidenceUploads] = useState<any[]>([]);
+  const [primaryLedgerUpload, setPrimaryLedgerUpload] = useState<any>(null);
+  const [primaryBankUpload, setPrimaryBankUpload] = useState<any>(null);
+  const [primaryEvidenceUploads, setPrimaryEvidenceUploads] = useState<any[]>([]);
+  const [duesLedgerUpload, setDuesLedgerUpload] = useState<any>(null);
+  const [duesBankUpload, setDuesBankUpload] = useState<any>(null);
+  const [duesEvidenceUploads, setDuesEvidenceUploads] = useState<any[]>([]);
+  const [ledgerAccountId, setLedgerAccountId] = useState<AccountId>("primary");
   const [evidenceKind, setEvidenceKind] = useState<EvidenceInput["kind"]>("receipt");
   const [evidenceTransactionNumber, setEvidenceTransactionNumber] = useState("");
   const [duesSheetSource, setDuesSheetSource] = useState("");
-  const [accountFilter, setAccountFilter] = useState<"primary" | "dues_intake" | "all">("all");
+  const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
   const [editingTransactionKey, setEditingTransactionKey] = useState("");
   const [transactionDraft, setTransactionDraft] = useState<TransactionInput>({
     number: 1,
@@ -199,34 +211,6 @@ function App() {
     return merged.sort((a, b) => a.number - b.number);
   }, [primaryTransactions, duesTransactions]);
 
-  const evidence = useMemo(() => {
-    return [...primaryEvidence, ...duesEvidence];
-  }, [primaryEvidence, duesEvidence]);
-
-  const transactionsText = useMemo(() => JSON.stringify(transactions, null, 2), [transactions]);
-  const evidenceText = useMemo(() => JSON.stringify(evidence, null, 2), [evidence]);
-
-  function accountDataFor(accountId: string) {
-    if (accountId === "dues_intake") {
-      return {
-        transactions: duesTransactions,
-        evidence: duesEvidence,
-        setTransactions: setDuesTransactions,
-        setEvidence: setDuesEvidence,
-        snapshot: duesSnapshot,
-        setSnapshot: setDuesSnapshot,
-      };
-    }
-    return {
-      transactions: primaryTransactions,
-      evidence: primaryEvidence,
-      setTransactions: setPrimaryTransactions,
-      setEvidence: setPrimaryEvidence,
-      snapshot: primarySnapshot,
-      setSnapshot: setPrimarySnapshot,
-    };
-  }
-
   function setAccountTransactions(accountId: string, txns: TransactionInput[]) {
     if (accountId === "dues_intake") {
       setDuesTransactions([...txns].sort((a, b) => a.number - b.number));
@@ -251,44 +235,77 @@ function App() {
     }
   }
 
-  const activeAccountId = accountFilter === "dues_intake" ? "dues_intake" : "primary";
-  const snapshot = accountFilter === "dues_intake" ? duesSnapshot : primarySnapshot;
-  const snapshotPayload = { organization_id: "aegis", account_id: activeAccountId, period: semester, period_start: periodStart, period_end: periodEnd, transactions, evidence };
+  const activeAccountId = ledgerAccountId;
+  const activeTransactions = activeAccountId === "dues_intake" ? duesTransactions : primaryTransactions;
+  const activeEvidence = activeAccountId === "dues_intake" ? duesEvidence : primaryEvidence;
+  const snapshot = activeAccountId === "dues_intake" ? duesSnapshot : primarySnapshot;
+  const ledgerUpload = activeAccountId === "dues_intake" ? duesLedgerUpload : primaryLedgerUpload;
+  const bankUpload = activeAccountId === "dues_intake" ? duesBankUpload : primaryBankUpload;
+  const evidenceUploads = activeAccountId === "dues_intake" ? duesEvidenceUploads : primaryEvidenceUploads;
+  const periodStart = activeAccountId === "dues_intake" ? duesPeriodStart : primaryPeriodStart;
+  const periodEnd = activeAccountId === "dues_intake" ? duesPeriodEnd : primaryPeriodEnd;
+  const openingBalance = activeAccountId === "dues_intake" ? duesOpeningBalance : primaryOpeningBalance;
+  const expectedClosingBalance = activeAccountId === "dues_intake" ? duesExpectedClosingBalance : primaryExpectedClosingBalance;
+  const snapshotPayload = {
+    organization_id: "aegis",
+    account_id: activeAccountId,
+    period: semester,
+    period_start: periodStart,
+    period_end: periodEnd,
+    transactions: activeTransactions,
+    evidence: activeEvidence,
+  };
 
-  const totalIncome = transactions.reduce((sum, row) => sum + Number(row.income || 0), 0);
-  const totalExpense = transactions.reduce((sum, row) => sum + Number(row.expense || 0), 0);
+  const totalIncome = activeTransactions.reduce((sum, row) => sum + Number(row.income || 0), 0);
+  const totalExpense = activeTransactions.reduce((sum, row) => sum + Number(row.expense || 0), 0);
   const computedClosing = openingBalance + totalIncome - totalExpense;
   const selectedTransactionLabel = editingTransactionKey ? `수정 중: ${editingTransactionKey}` : "새 거래";
 
-  function updateTransactionInAccount(accountId: string, updater: (prev: TransactionInput[]) => TransactionInput[]) {
-    if (accountId === "dues_intake") {
-      setDuesTransactions((prev) => updater([...prev]).sort((a, b) => a.number - b.number));
-    } else {
-      setPrimaryTransactions((prev) => updater([...prev]).sort((a, b) => a.number - b.number));
-    }
+  function setPeriodStart(value: string) {
+    if (activeAccountId === "dues_intake") setDuesPeriodStart(value);
+    else setPrimaryPeriodStart(value);
   }
 
-  function resetTransactionDraft(rows: TransactionInput[] = transactions) {
+  function setPeriodEnd(value: string) {
+    if (activeAccountId === "dues_intake") setDuesPeriodEnd(value);
+    else setPrimaryPeriodEnd(value);
+  }
+
+  function setOpeningBalance(value: number) {
+    if (activeAccountId === "dues_intake") setDuesOpeningBalance(value);
+    else setPrimaryOpeningBalance(value);
+  }
+
+  function setExpectedClosingBalance(value: number) {
+    if (activeAccountId === "dues_intake") setDuesExpectedClosingBalance(value);
+    else setPrimaryExpectedClosingBalance(value);
+  }
+
+  function resetTransactionDraft(rows: TransactionInput[] = activeTransactions, accountId: AccountId = activeAccountId) {
     const sorted = [...rows].sort((a, b) => a.number - b.number);
     const last = sorted[sorted.length - 1];
+    const defaultDate = accountId === "dues_intake" ? duesPeriodStart : primaryPeriodStart;
+    const defaultBalance = accountId === "dues_intake" ? duesOpeningBalance : primaryOpeningBalance;
     setEditingTransactionKey("");
     setTransactionDraft({
       number: Number(last?.number || 0) + 1,
-      date: periodStart,
+      date: defaultDate,
       description: "",
       income: 0,
       expense: 0,
-      balance: Number(last?.balance ?? openingBalance),
+      balance: Number(last?.balance ?? defaultBalance),
       category: "미분류",
       processing_method: "",
       details: "",
       note: "",
       evidence_ids: [],
-      account_id: activeAccountId,
+      account_id: accountId,
     });
   }
 
   function selectTransactionForEdit(row: TransactionInput) {
+    const accountId = (row.account_id === "dues_intake" ? "dues_intake" : "primary") as AccountId;
+    setLedgerAccountId(accountId);
     setEditingTransactionKey(row.transaction_id || String(row.number));
     setTransactionDraft({
       ...row,
@@ -426,7 +443,7 @@ function App() {
       setAccountSnapshot(acctId, result);
       setAccountTransactions(acctId, result.transactions);
       setAccountEvidence(acctId, result.evidence);
-      resetTransactionDraft([...primaryTransactions, ...duesTransactions]);
+      resetTransactionDraft(result.transactions, acctId as AccountId);
       return;
     }
     const currentTxn = acctId === "dues_intake" ? duesTransactions : primaryTransactions;
@@ -439,7 +456,7 @@ function App() {
       ? currentTxn.map((item) => (item.transaction_id === editingTransactionKey || String(item.number) === editingTransactionKey ? normalizedDraft : item))
       : [...currentTxn, normalizedDraft];
     setAccountTransactions(acctId, next);
-    resetTransactionDraft([...(acctId === "dues_intake" ? primaryTransactions : next), ...(acctId === "dues_intake" ? next : duesTransactions)]);
+    resetTransactionDraft(next, acctId as AccountId);
   }
 
   async function deleteTransaction(row: TransactionInput) {
@@ -452,30 +469,37 @@ function App() {
       setAccountSnapshot(acctId, result);
       setAccountTransactions(acctId, result.transactions);
       setAccountEvidence(acctId, result.evidence);
-      resetTransactionDraft([...primaryTransactions, ...duesTransactions]);
+      resetTransactionDraft(result.transactions, acctId as AccountId);
       return;
     }
     const currentTxn = acctId === "dues_intake" ? duesTransactions : primaryTransactions;
     const next = currentTxn.filter((item) => item.transaction_id !== key && String(item.number) !== key);
     setAccountTransactions(acctId, next);
-    resetTransactionDraft([...(acctId === "dues_intake" ? primaryTransactions : next), ...(acctId === "dues_intake" ? next : duesTransactions)]);
+    resetTransactionDraft(next, acctId as AccountId);
   }
 
   useEffect(() => {
-    if (accountFilter === "dues_intake" && activeTab === "public") {
+    if (ledgerAccountId === "dues_intake" && activeTab === "public") {
       setActiveTab("ledger");
     }
-  }, [accountFilter, activeTab]);
+  }, [ledgerAccountId, activeTab]);
 
   async function uploadWorkbook(file: File, kind: "ledger" | "bank") {
+    const targetAccountId = ledgerAccountId;
     const result = await run(kind === "ledger" ? "Aegis 장부 분석" : "토스 거래내역 분석", async () => {
       const form = new FormData();
       form.append("file", file);
       return uploadForm("/imports/upload", form);
     });
     if (result) {
-      if (kind === "ledger") setLedgerUpload(result);
-      else setBankUpload(result);
+      if (targetAccountId === "dues_intake") {
+        if (kind === "ledger") setDuesLedgerUpload(result);
+        else setDuesBankUpload(result);
+      } else if (kind === "ledger") {
+        setPrimaryLedgerUpload(result);
+      } else {
+        setPrimaryBankUpload(result);
+      }
     }
   }
 
@@ -503,40 +527,57 @@ function App() {
       return uploaded;
     });
     if (result) {
-      setEvidenceUploads((current) => [...current, ...result]);
-      const targetAccountId = result[0]?.account_id || "primary";
-      setAccountEvidence(targetAccountId, [
-        ...(targetAccountId === "dues_intake" ? duesEvidence : primaryEvidence).filter(
-          (item) => !result.some((added: any) => added.id === item.id)
-        ),
-        ...result,
-      ]);
+      const primaryAdded = result.filter((item: any) => item.account_id !== "dues_intake");
+      const duesAdded = result.filter((item: any) => item.account_id === "dues_intake");
+      if (primaryAdded.length) {
+        setPrimaryEvidenceUploads((current) => [...current, ...primaryAdded]);
+        setPrimaryEvidence((current) => [
+          ...current.filter((item) => !primaryAdded.some((added: any) => added.id === item.id)),
+          ...primaryAdded,
+        ]);
+      }
+      if (duesAdded.length) {
+        setDuesEvidenceUploads((current) => [...current, ...duesAdded]);
+        setDuesEvidence((current) => [
+          ...current.filter((item) => !duesAdded.some((added: any) => added.id === item.id)),
+          ...duesAdded,
+        ]);
+      }
     }
   }
 
   async function importWorkbooks() {
     if (!ledgerUpload) return;
+    const targetAccountId = ledgerAccountId;
     const result: any = await run("실제 장부 스냅샷 생성", () => request("/imports/workbook-snapshot", {
       method: "POST",
       body: JSON.stringify({
         ledger_upload_id: ledgerUpload.id,
         bank_upload_id: bankUpload?.id || null,
         evidence_ids: evidenceUploads.map((item) => item.id),
-        account_id: ledgerAccountId,
+        account_id: targetAccountId,
         period: semester,
-        period_start: null,
-        period_end: null,
-        opening_balance: 0,
+        period_start: periodStart || null,
+        period_end: periodEnd || null,
+        opening_balance: Number(openingBalance || 0),
       }),
     }));
     if (!result) return;
-    setAccountSnapshot(ledgerAccountId, result);
-    setAccountTransactions(ledgerAccountId, result.transactions);
-    setAccountEvidence(ledgerAccountId, result.evidence);
-    setOpeningBalance(Number(result.ledger?.opening_balance || 0));
-    setExpectedClosingBalance(Number(result.ledger?.closing_balance || 0));
-    if (result.ledger?.period_start) setPeriodStart(result.ledger.period_start);
-    if (result.ledger?.period_end) setPeriodEnd(result.ledger.period_end);
+    setAccountSnapshot(targetAccountId, result);
+    setAccountTransactions(targetAccountId, result.transactions);
+    setAccountEvidence(targetAccountId, result.evidence);
+    if (targetAccountId === "dues_intake") {
+      setDuesOpeningBalance(Number(result.ledger?.opening_balance || 0));
+      setDuesExpectedClosingBalance(Number(result.ledger?.closing_balance || 0));
+      if (result.ledger?.period_start) setDuesPeriodStart(result.ledger.period_start);
+      if (result.ledger?.period_end) setDuesPeriodEnd(result.ledger.period_end);
+    } else {
+      setPrimaryOpeningBalance(Number(result.ledger?.opening_balance || 0));
+      setPrimaryExpectedClosingBalance(Number(result.ledger?.closing_balance || 0));
+      if (result.ledger?.period_start) setPrimaryPeriodStart(result.ledger.period_start);
+      if (result.ledger?.period_end) setPrimaryPeriodEnd(result.ledger.period_end);
+    }
+    resetTransactionDraft(result.transactions || [], targetAccountId);
   }
 
   async function importGoogleSheet() {
@@ -550,9 +591,9 @@ function App() {
         spreadsheet_url_or_id: googleSheetSource.trim(),
         range: googleSheetRange.trim() || "B:I",
         period: semester,
-        period_start: periodStart || null,
-        period_end: periodEnd || null,
-        opening_balance: Number(openingBalance || 0),
+        period_start: primaryPeriodStart || null,
+        period_end: primaryPeriodEnd || null,
+        opening_balance: Number(primaryOpeningBalance || 0),
         organization_id: "aegis",
         account_id: "primary",
       }),
@@ -563,8 +604,10 @@ function App() {
     setAccountEvidence("primary", result.evidence || []);
     const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
     const last = sortedTransactions[sortedTransactions.length - 1];
-    if (last?.balance !== undefined) setExpectedClosingBalance(Number(last.balance));
-    resetTransactionDraft([...(result.transactions || []), ...duesTransactions]);
+    if (last?.balance !== undefined) setPrimaryExpectedClosingBalance(Number(last.balance));
+    setLedgerAccountId("primary");
+    setAccountFilter("primary");
+    resetTransactionDraft(result.transactions || [], "primary");
   }
 
   async function importGoogleDuesSheet() {
@@ -578,9 +621,9 @@ function App() {
         spreadsheet_url_or_id: duesSheetSource.trim(),
         range: googleSheetRange.trim() || "B:I",
         period: semester,
-        period_start: periodStart || null,
-        period_end: periodEnd || null,
-        opening_balance: Number(openingBalance || 0),
+        period_start: duesPeriodStart || null,
+        period_end: duesPeriodEnd || null,
+        opening_balance: Number(duesOpeningBalance || 0),
         organization_id: "aegis",
         account_id: "dues_intake",
       }),
@@ -591,21 +634,25 @@ function App() {
     setAccountEvidence("dues_intake", result.evidence || []);
     const sortedTransactions = [...(result.transactions || [])].sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
     const last = sortedTransactions[sortedTransactions.length - 1];
-    if (last?.balance !== undefined) setExpectedClosingBalance(Number(last.balance));
-    resetTransactionDraft([...primaryTransactions, ...(result.transactions || [])]);
+    if (last?.balance !== undefined) setDuesExpectedClosingBalance(Number(last.balance));
+    setLedgerAccountId("dues_intake");
+    setAccountFilter("dues_intake");
+    resetTransactionDraft(result.transactions || [], "dues_intake");
   }
 
   async function attachEvidenceToSnapshot() {
-    const targetSnapshot = activeAccountId === "dues_intake" ? duesSnapshot : primarySnapshot;
-    if (!targetSnapshot?.id || !evidenceUploads.length) return;
+    const targetAccountId = activeAccountId;
+    const targetSnapshot = targetAccountId === "dues_intake" ? duesSnapshot : primarySnapshot;
+    const targetEvidenceUploads = targetAccountId === "dues_intake" ? duesEvidenceUploads : primaryEvidenceUploads;
+    if (!targetSnapshot?.id || !targetEvidenceUploads.length) return;
     const result: any = await run("증빙 반영 스냅샷 생성", () => request(`/ledger-snapshots/${targetSnapshot.id}/evidence`, {
       method: "POST",
-      body: JSON.stringify({ evidence_ids: evidenceUploads.map((item) => item.id) }),
+      body: JSON.stringify({ evidence_ids: targetEvidenceUploads.map((item) => item.id) }),
     }));
     if (!result) return;
-    setAccountSnapshot(activeAccountId, result);
-    setAccountTransactions(activeAccountId, result.transactions);
-    setAccountEvidence(activeAccountId, result.evidence);
+    setAccountSnapshot(targetAccountId, result);
+    setAccountTransactions(targetAccountId, result.transactions);
+    setAccountEvidence(targetAccountId, result.evidence);
   }
 
   async function downloadPackage() {
@@ -673,7 +720,7 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
         </section>
       ) : (
         <>
-          <nav className="tabs" aria-label="ATLAS 메뉴">{tabs.filter((tab) => !tab.hideForDues || accountFilter !== "dues_intake").map((tab) => <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>{tab.icon}{tab.label}</button>)}</nav>
+          <nav className="tabs" aria-label="ATLAS 메뉴">{tabs.filter((tab) => !tab.hideForDues || ledgerAccountId !== "dues_intake").map((tab) => <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>{tab.icon}{tab.label}</button>)}</nav>
 
           <section className="metric-grid">
             <Metric label="수입총액" value={money(totalIncome)} /><Metric label="지출총액" value={money(totalExpense)} /><Metric label="계산잔액" value={money(computedClosing)} /><Metric label="기대잔액" value={money(expectedClosingBalance)} />
@@ -702,7 +749,7 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
               </div>
             </section>
             <section className="import-surface">
-              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => setLedgerAccountId(event.target.value as "primary" | "dues_intake")}><option value="primary">운영계좌 (토스뱅크)</option><option value="dues_intake">회비입금계좌 (기업은행)</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
+              <div className="import-heading"><div><p className="eyebrow">PRODUCTION IMPORT</p><h3>실제 파일 가져오기</h3></div><div className="import-account-select"><select aria-label="장부 계좌 선택" value={ledgerAccountId} onChange={(event) => { const accountId = event.target.value as AccountId; setLedgerAccountId(accountId); resetTransactionDraft(accountId === "dues_intake" ? duesTransactions : primaryTransactions, accountId); }}><option value="primary">운영계좌 (토스뱅크)</option><option value="dues_intake">회비입금계좌 (기업은행)</option></select></div>{snapshot?.source?.reconciliation && <StatusBadge value={snapshot.source.reconciliation.status} />}</div>
               <div className="upload-grid">
                 <label className={`upload-slot ${ledgerUpload ? "ready" : ""}`}><FileSpreadsheet size={22} /><span>Aegis 회계장부</span><small>{ledgerUpload?.filename || ".xlsx"}</small><input type="file" accept=".xlsx,.xlsm" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "ledger"); }} /></label>
                 <label className={`upload-slot ${bankUpload ? "ready" : ""}`}><Landmark size={22} /><span>토스뱅크 / IBK 거래내역</span><small>{bankUpload?.filename || ".xlsx / .pdf"}</small><input type="file" accept=".xlsx,.xlsm,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadWorkbook(file, "bank"); }} /></label>
@@ -739,7 +786,7 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
                 </div>
                 <table>
                   <thead><tr><th>번호</th><th>날짜</th><th>계좌</th><th>내용</th><th>수입</th><th>지출</th><th>잔액</th><th>처리방식</th><th>상세정보</th><th>증빙</th><th></th></tr></thead>
-                  <tbody>{transactions.filter((row) => accountFilter === "all" || (row.account_id || "primary") === accountFilter).map((row) => <tr key={row.transaction_id || row.number}><td>{row.number}</td><td>{row.date}</td><td><span className={`account-tag ${(row.account_id || "primary") === "dues_intake" ? "dues" : "primary"}`}>{(row.account_id || "primary") === "dues_intake" ? "회비" : "운영"}</span></td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
+                  <tbody>{transactions.filter((row) => accountFilter === "all" || (row.account_id || "primary") === accountFilter).map((row) => <tr key={`${row.account_id || "primary"}:${row.transaction_id || row.number}`}><td>{row.number}</td><td>{row.date}</td><td><span className={`account-tag ${(row.account_id || "primary") === "dues_intake" ? "dues" : "primary"}`}>{(row.account_id || "primary") === "dues_intake" ? "회비" : "운영"}</span></td><td>{row.description}</td><td>{row.income ? money(row.income) : "-"}</td><td>{row.expense ? money(row.expense) : "-"}</td><td>{money(row.balance)}</td><td>{row.processing_method || "-"}</td><td>{row.details || "-"}</td><td>{row.evidence_ids?.length || 0}</td><td><div className="row-actions"><button className="icon-button secondary" aria-label={`${row.number}번 거래 수정`} onClick={() => selectTransactionForEdit(row)}><SquarePen size={15} /></button><button className="icon-button secondary danger" aria-label={`${row.number}번 거래 삭제`} onClick={() => deleteTransaction(row)}><Trash2 size={15} /></button></div></td></tr>)}</tbody>
                 </table>
               </div>
             </section>
@@ -756,7 +803,7 @@ snapshot_id: activeAccountId === "dues_intake" ? duesSnapshot?.id : primarySnaps
           {activeTab === "public" && <>
             <section className="section-head"><div><p className="eyebrow">MEMBER DISCLOSURE</p><h2>월간 회원 공개</h2><p>긴 난수 토큰을 사용하며 링크를 즉시 폐기하거나 재발급할 수 있습니다.</p></div>{report && <StatusBadge value={report.status || "active"} />}</section>
             <section className="workspace-grid"><div className="panel"><h3>공개 설정</h3><div className="form-grid"><label>공개 월<input value={month} onChange={(e) => setMonth(e.target.value)} /></label><label>만료일<input type="datetime-local" id="report-expiry" /></label></div></div><div className="panel"><h3>공개 범위</h3><ul className="privacy-list"><li>거래 상대방 및 계좌번호 제외</li><li>증빙 ID·원본 경로 제외</li><li>내부 비고 기본 비공개</li><li>검색엔진 색인 차단</li></ul></div></section>
-            <div className="action-bar"><button disabled={!!busy} onClick={async () => { const expiry = (document.getElementById("report-expiry") as HTMLInputElement)?.value; const result: any = await run("월간 공개 생성", () => request("/monthly-reports", { method: "POST", body: JSON.stringify({ club_name: clubName, month, snapshot_id: primarySnapshot?.id, opening_balance: openingBalance, transactions, evidence, visible_notes: false, expires_at: expiry ? new Date(expiry).toISOString() : null, allow_download: false }) })); if (result) setReport({ ...result, status: "active" }); }}><Link2 size={17} /> 공개 페이지 생성</button><button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button><button className="secondary danger" disabled={!report?.report_id || report?.status === "revoked"} onClick={async () => { const result: any = await run("링크 폐기", () => request(`/monthly-reports/${report.report_id}/revoke`, { method: "POST" })); if (result) setReport({ ...report, status: "revoked" }); }}><Unlink size={17} /> 링크 폐기</button><button className="secondary" disabled={!report?.report_id} onClick={async () => { const result: any = await run("링크 재발급", () => request(`/monthly-reports/${report.report_id}/regenerate-link`, { method: "POST" })); if (result) setReport({ ...report, ...result }); }}><RefreshCw size={17} /> 재발급</button></div>
+            <div className="action-bar"><button disabled={!!busy} onClick={async () => { const expiry = (document.getElementById("report-expiry") as HTMLInputElement)?.value; const result: any = await run("월간 공개 생성", () => request("/monthly-reports", { method: "POST", body: JSON.stringify({ club_name: clubName, month, snapshot_id: primarySnapshot?.id, opening_balance: primaryOpeningBalance, transactions: primaryTransactions, evidence: primaryEvidence, visible_notes: false, expires_at: expiry ? new Date(expiry).toISOString() : null, allow_download: false }) })); if (result) setReport({ ...result, status: "active" }); }}><Link2 size={17} /> 공개 페이지 생성</button><button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button><button className="secondary danger" disabled={!report?.report_id || report?.status === "revoked"} onClick={async () => { const result: any = await run("링크 폐기", () => request(`/monthly-reports/${report.report_id}/revoke`, { method: "POST" })); if (result) setReport({ ...report, status: "revoked" }); }}><Unlink size={17} /> 링크 폐기</button><button className="secondary" disabled={!report?.report_id} onClick={async () => { const result: any = await run("링크 재발급", () => request(`/monthly-reports/${report.report_id}/regenerate-link`, { method: "POST" })); if (result) setReport({ ...report, ...result }); }}><RefreshCw size={17} /> 재발급</button></div>
             {report?.public_url && <div className="link-output"><Link2 size={17} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a></div>}
           </>}
 

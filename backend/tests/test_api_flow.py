@@ -321,7 +321,7 @@ class ApiWorkflowTest(unittest.TestCase):
         dues = main.evidence_transaction_number_from_filename("*42* 2026. 3. 1. 회비 환불 소명.pdf")
 
         self.assertEqual(dated, (None, "unmatched", None))
-        self.assertEqual(explicit, (42, "filename_hash_id", None))
+        self.assertEqual(explicit, (42, "filename_hash_id", "primary"))
         self.assertEqual(dues, (42, "filename_dues_star_id", "dues_intake"))
 
     def test_transaction_crud_creates_snapshot_revisions(self) -> None:
@@ -357,6 +357,63 @@ class ApiWorkflowTest(unittest.TestCase):
         deleted = self.client.delete(f"/ledger-snapshots/{updated_snapshot['id']}/transactions/3", headers=self.headers)
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(len(deleted.json()["transactions"]), 2)
+
+    def test_snapshots_keep_same_number_transactions_separate_by_account(self) -> None:
+        transaction = {
+            "number": 1,
+            "date": "2026-01-01",
+            "description": "Opening transaction",
+            "income": 10_000,
+            "expense": 0,
+            "balance": 10_000,
+            "account_id": "primary",
+            "transaction_id": "tx_legacy_identity",
+            "source_row_hash": "legacy_source_hash",
+        }
+        primary = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={"account_id": "primary", "period": "2026", "transactions": [transaction]},
+        )
+        dues = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={"account_id": "dues_intake", "period": "2026", "transactions": [transaction]},
+        )
+
+        self.assertEqual(primary.status_code, 200)
+        self.assertEqual(dues.status_code, 200)
+        primary_snapshot = self.client.get(f"/ledger-snapshots/{primary.json()['id']}", headers=self.headers).json()
+        dues_snapshot = self.client.get(f"/ledger-snapshots/{dues.json()['id']}", headers=self.headers).json()
+        self.assertEqual(primary_snapshot["transactions"][0]["account_id"], "primary")
+        self.assertEqual(dues_snapshot["transactions"][0]["account_id"], "dues_intake")
+        self.assertEqual(primary_snapshot["transactions"][0]["transaction_id"], "tx_legacy_identity")
+        self.assertNotEqual(
+            primary_snapshot["transactions"][0]["transaction_id"],
+            dues_snapshot["transactions"][0]["transaction_id"],
+        )
+
+    def test_snapshot_rejects_evidence_from_another_account(self) -> None:
+        response = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={
+                "account_id": "dues_intake",
+                "period": "2026",
+                "transactions": [],
+                "evidence": [
+                    {
+                        "id": "primary-ev1",
+                        "account_id": "primary",
+                        "transaction_number": 1,
+                        "filename": "#1# receipt.pdf",
+                        "kind": "receipt",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

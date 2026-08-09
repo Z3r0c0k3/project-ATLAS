@@ -183,7 +183,9 @@ def _linked_evidence(tx: Transaction, evidence: list[Evidence]) -> list[Evidence
     if tx.evidence_id:
         ids.add(tx.evidence_id)
     for item in evidence:
-        if item.id in ids or item.transaction_number == tx.number or tx.transaction_id in item.transaction_ids:
+        if item.account_id == tx.account_id and (
+            item.id in ids or item.transaction_number == tx.number or tx.transaction_id in item.transaction_ids
+        ):
             if item not in linked:
                 linked.append(item)
     return linked

@@ -86,6 +86,8 @@ def processing_method_requires_evidence(value: str | None) -> bool:
 
 def _transaction_identity(row: dict) -> tuple[str, str]:
     row_payload = {
+        "organization_id": row.get("organization_id") or "aegis",
+        "account_id": row.get("account_id") or "primary",
         "number": row.get("number"),
         "date": row.get("date"),
         "description": str(row.get("description") or "").strip(),
@@ -224,11 +226,12 @@ def validate_ledger(
     seen_numbers: set[int] = set()
     seen_fingerprints: set[str] = set()
     evidence_by_id = {item.id: item for item in evidence}
-    transaction_by_number = {item.number: item for item in transactions}
+    transaction_by_number = {(item.account_id, item.number): item for item in transactions}
     links: dict[str, set[str]] = {item.id: set(item.transaction_ids) for item in evidence}
     for item in evidence:
-        if item.transaction_number in transaction_by_number:
-            tx_id = transaction_by_number[item.transaction_number].transaction_id
+        transaction_key = (item.account_id, item.transaction_number)
+        if transaction_key in transaction_by_number:
+            tx_id = transaction_by_number[transaction_key].transaction_id
             if tx_id:
                 links[item.id].add(tx_id)
     for tx in transactions:
@@ -278,7 +281,12 @@ def validate_ledger(
         previous_balance = tx.balance
 
         linked_ids = set(tx.evidence_ids)
-        linked_ids.update(item.id for item in evidence if tx.transaction_id in item.transaction_ids or item.transaction_number == tx.number)
+        linked_ids.update(
+            item.id
+            for item in evidence
+            if item.account_id == tx.account_id
+            and (tx.transaction_id in item.transaction_ids or item.transaction_number == tx.number)
+        )
         matching_required_evidence: list[Evidence] = []
         for evidence_id in linked_ids:
             item = evidence_by_id.get(evidence_id)

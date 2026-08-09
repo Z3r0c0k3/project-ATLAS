@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from app.services.accounting import Evidence, Transaction, public_monthly_summary, validate_ledger
+from app.services.accounting import CARD_EVIDENCE_METHODS, Evidence, Transaction, public_monthly_summary, validate_ledger
 from app.services.documents import build_submission_package
 
 
@@ -60,6 +60,25 @@ class AccountingValidationTest(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertNotIn("MISSING_CARD_EVIDENCE", {issue["code"] for issue in result["issues"]})
 
+    def test_evidence_with_same_number_from_other_account_does_not_match(self) -> None:
+        transactions = [
+            Transaction(
+                1,
+                "2026-03-01",
+                "Card purchase",
+                0,
+                30_000,
+                970_000,
+                processing_method=min(CARD_EVIDENCE_METHODS, key=len),
+                account_id="primary",
+            ),
+        ]
+        evidence = [Evidence("dues-ev1", 1, "*1* receipt.pdf", "receipt", account_id="dues_intake")]
+
+        result = validate_ledger(1_000_000, transactions, evidence, 970_000)
+
+        self.assertIn("MISSING_CARD_EVIDENCE", {issue["code"] for issue in result["issues"]})
+
     def test_monthly_summary_hides_private_metadata(self) -> None:
         transactions = [
             Transaction(1, "2026-03-01", "회비", 200_000, 0, 1_200_000),
@@ -78,7 +97,7 @@ class AccountingValidationTest(unittest.TestCase):
 class PackageGenerationTest(unittest.TestCase):
     def test_submission_report_marks_missing_card_evidence_as_error(self) -> None:
         transactions = [
-            Transaction(1, "2026-03-01", "행사용 비품", 0, 30_000, 970_000, processing_method="카드결제"),
+            Transaction(1, "2026-03-01", "행사용 비품", 0, 30_000, 970_000, processing_method=min(CARD_EVIDENCE_METHODS, key=len)),
         ]
         with tempfile.TemporaryDirectory() as tmp:
             result = build_submission_package(
