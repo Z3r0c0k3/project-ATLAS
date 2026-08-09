@@ -231,6 +231,12 @@ class WorkbookApiTest(unittest.TestCase):
         self.assertEqual(attached.status_code, 200)
         self.assertEqual(len(attached.json()["evidence"]), 1)
         self.assertIn(evidence.json()["id"], attached.json()["transactions"][1]["evidence_ids"])
+        snapshot_detail = self.client.get(f"/ledger-snapshots/{attached.json()['id']}", headers=self.headers).json()
+        self.assertTrue(snapshot_detail["evidence"][0]["preview_available"])
+        self.assertNotIn("local_path", snapshot_detail["evidence"][0])
+        preview = self.client.get(f"/evidence/{evidence.json()['id']}/file", headers=self.headers)
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.content, receipt_path.read_bytes())
 
     def test_bank_file_can_attach_to_google_ledger_snapshot_without_ledger_upload(self) -> None:
         snapshot = self.client.post(

@@ -41,6 +41,7 @@ from .services.accounting import (
     acknowledge_issues,
     normalize_evidence,
     normalize_transactions,
+    public_monthly_summary,
     snapshot_payload,
 )
 from .services.discord import render_monthly_discord_message, send_webhook
@@ -254,6 +255,19 @@ def evidence_kind_from_filename(filename: str) -> str:
     return "other"
 
 
+def public_evidence_record(item: dict) -> dict:
+    local_path = item.get("local_path")
+    return {
+        **{key: value for key, value in item.items() if key != "local_path"},
+        "filename": normalize_filename(item.get("filename")),
+        "preview_available": bool(local_path and Path(local_path).is_file()),
+    }
+
+
+def public_snapshot_record(snapshot: dict) -> dict:
+    return {**snapshot, "evidence": [public_evidence_record(item) for item in snapshot.get("evidence", [])]}
+
+
 def create_snapshot_revision(
     current: dict,
     transactions: list[dict],
@@ -298,6 +312,8 @@ def resolve_snapshot_for_package(payload: SubmissionPackageRequest, session: dic
         snapshot = store.get("ledger_snapshots", payload.snapshot_id)
         if not snapshot:
             raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+        if snapshot.get("account_id", "primary") != "primary":
+            raise HTTPException(status_code=422, detail="월간 공개 자료는 동아리운영계좌 장부로만 생성할 수 있습니다.")
         if snapshot.get("account_id") != payload.account_id:
             raise HTTPException(status_code=409, detail="선택한 계좌와 장부 스냅샷의 계좌가 다릅니다.")
         return snapshot
@@ -456,6 +472,27 @@ def previous_month_period(now: datetime | None = None) -> tuple[str, str]:
     first_of_month = current.replace(day=1)
     previous = first_of_month - timedelta(days=1)
     return previous.strftime("%Y-%m"), f"{previous.year}년 {previous.month}월"
+
+
+def normalize_month_period(value: str) -> tuple[str, str]:
+    match = re.fullmatch(r"\s*(\d{4})(?:-|년\s*)(\d{1,2})(?:월)?\s*", value)
+    if not match:
+        raise HTTPException(status_code=422, detail="공개 월은 YYYY-MM 형식으로 입력해주세요.")
+    year, month = int(match.group(1)), int(match.group(2))
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=422, detail="공개 월이 올바르지 않습니다.")
+    return f"{year:04d}-{month:02d}", f"{year}년 {month}월"
+
+
+def normalize_expiry(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+    value = value.astimezone(timezone.utc)
+    if value <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=422, detail="링크 만료일은 현재 시각 이후여야 합니다.")
+    return value.isoformat()
 
 
 def create_google_sheet_snapshot(spreadsheet_id: str, payload: GoogleSheetSnapshotRequest, session: dict) -> dict:
@@ -806,7 +843,7 @@ def upload_evidence(
         "ev",
     )
     audit(session, "evidence.uploaded", "evidence", row["id"], after=row, request=request)
-    return row
+    return public_evidence_record(row)
 
 
 @app.get("/evidence")
@@ -814,9 +851,21 @@ def list_evidence(
     session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
 ) -> list[dict]:
     return [
-        {**item, "filename": normalize_filename(item.get("filename"))}
+        public_evidence_record(item)
         for item in reversed(list(store.read_collection("evidence").values()))
     ]
+
+
+@app.get("/evidence/{evidence_id}/file")
+def preview_evidence_file(
+    evidence_id: str,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
+) -> FileResponse:
+    item = store.get("evidence", evidence_id)
+    path = Path(item.get("local_path", "")) if item else None
+    if not item or not path or not path.is_file():
+        raise HTTPException(status_code=404, detail="증빙 원본 파일을 찾을 수 없습니다.")
+    return FileResponse(path, media_type=item.get("mime_type"), filename=normalize_filename(item.get("filename") or path.name))
 
 
 @app.post("/imports/workbook-snapshot")
@@ -954,7 +1003,7 @@ def get_ledger_snapshot(
     snapshot = store.get("ledger_snapshots", snapshot_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Ledger snapshot not found")
-    return snapshot
+    return public_snapshot_record(snapshot)
 
 
 @app.post("/ledger-snapshots/{snapshot_id}/transactions")
@@ -980,7 +1029,7 @@ def add_snapshot_transaction(
         {"action": "transaction.created", "transaction_number": payload.number},
     )
     audit(session, "ledger.transaction.created", "ledger_snapshot", created["id"], before={"parent_snapshot_id": snapshot_id}, after={"transaction_number": payload.number}, request=request)
-    return created
+    return public_snapshot_record(created)
 
 
 @app.put("/ledger-snapshots/{snapshot_id}/transactions/{transaction_key}")
@@ -1088,7 +1137,7 @@ def attach_snapshot_evidence(
         after={"evidence_count": len(evidence_by_id)},
         request=request,
     )
-    return created
+    return public_snapshot_record(created)
 
 
 @app.post("/ledger-snapshots/{snapshot_id}/bank-transactions")
@@ -1148,7 +1197,7 @@ def attach_snapshot_bank_transactions(
         after={"upload_id": upload["id"], "reconciliation": reconciliation},
         request=request,
     )
-    return created
+    return public_snapshot_record(created)
 
 
 @app.post(
@@ -1445,20 +1494,26 @@ def create_monthly_report(
             ),
             session,
         )
+    month_key, month_label = normalize_month_period(payload.month)
     share_id = secrets.token_urlsafe(32)
-    transactions = normalize_transactions(snapshot["transactions"])
+    transactions = [item for item in normalize_transactions(snapshot["transactions"]) if item.date.startswith(month_key)]
+    if not transactions:
+        raise HTTPException(status_code=422, detail=f"{month_label} 동아리운영계좌 거래가 없습니다.")
+    opening_balance = transactions[0].balance - transactions[0].income + transactions[0].expense
+    expires_at = normalize_expiry(payload.expires_at)
     report_payload = build_monthly_report_payload(
         "pending",
         share_id,
         payload.club_name,
-        payload.month,
-        payload.opening_balance,
+        month_label,
+        opening_balance,
         transactions,
         payload.visible_notes,
         snapshot["id"],
-        payload.expires_at.isoformat() if payload.expires_at else None,
+        expires_at,
         payload.allow_download,
     )
+    report_payload["month_filter_version"] = 1
     report = store.insert("monthly_reports", report_payload, "rep")
     public_url = f"{PUBLIC_FRONTEND_BASE_URL}/public/monthly/{share_id}"
     audit(session, "monthly_report.created", "monthly_report", report["id"], after={"snapshot_id": snapshot["id"], "expires_at": report.get("expires_at")}, request=request)
@@ -1467,7 +1522,7 @@ def create_monthly_report(
         snapshot_id=snapshot["id"],
         share_id=share_id,
         public_url=public_url,
-        expires_at=payload.expires_at,
+        expires_at=datetime.fromisoformat(expires_at) if expires_at else None,
         summary=report["summary"],
     )
 
@@ -1561,6 +1616,28 @@ def list_monthly_reports(
     return list(reversed(list(store.read_collection("monthly_reports").values())))
 
 
+def monthly_report_expired(report: dict) -> bool:
+    if not report.get("expires_at"):
+        return False
+    expires_at = datetime.fromisoformat(report["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)
+
+
+def filtered_monthly_report(report: dict) -> dict:
+    month_key, month_label = normalize_month_period(report["month"])
+    transactions = [item for item in report.get("transactions", []) if str(item.get("date") or "").startswith(month_key)]
+    normalized = normalize_transactions(transactions)
+    opening_balance = normalized[0].balance - normalized[0].income + normalized[0].expense if normalized else 0
+    return {
+        **report,
+        "month": month_label,
+        "summary": public_monthly_summary(opening_balance, normalized),
+        "transactions": transactions,
+    }
+
+
 @app.get("/public/monthly/{share_id}")
 def get_public_monthly_report(share_id: str, request: Request) -> JSONResponse:
     report = store.find_one_by("monthly_reports", "share_id", share_id)
@@ -1568,12 +1645,9 @@ def get_public_monthly_report(share_id: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=404, detail="Monthly report not found")
     if report.get("status") == "revoked":
         raise HTTPException(status_code=410, detail="This public link has been revoked")
-    if report.get("expires_at"):
-        expires_at = datetime.fromisoformat(report["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at <= datetime.now(timezone.utc):
-            raise HTTPException(status_code=410, detail="This public link has expired")
+    if monthly_report_expired(report):
+        raise HTTPException(status_code=410, detail="This public link has expired")
+    report = filtered_monthly_report(report)
     store.insert(
         "public_access_logs",
         {
@@ -1660,8 +1734,11 @@ def preview_discord_message(
     webhook = store.get("discord_webhooks", payload.webhook_id)
     if not report or report.get("status") != "active":
         raise HTTPException(status_code=404, detail="Active monthly report not found")
+    if monthly_report_expired(report):
+        raise HTTPException(status_code=410, detail="Monthly report link has expired")
     if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")
+    report = filtered_monthly_report(report)
     public_url = report.get("public_url") or f"{PUBLIC_FRONTEND_BASE_URL}/public/monthly/{payload.share_id}"
     preview = render_monthly_discord_message(report, public_url)
     message = store.insert(
@@ -1713,6 +1790,9 @@ def send_discord_message(
         return DiscordMessageResponse(message_id=message_id, status="sent", preview=message["preview"], approved_at=message.get("approved_at"), sent_at=message.get("sent_at"))
     if message.get("status") not in {"approved", "failed"}:
         raise HTTPException(status_code=409, detail="Message must be approved before sending")
+    report = store.get("monthly_reports", message["report_id"])
+    if not report or report.get("status") != "active" or monthly_report_expired(report):
+        raise HTTPException(status_code=410, detail="Monthly report link is no longer active")
     webhook = store.get("discord_webhooks", message["webhook_id"])
     if not webhook:
         raise HTTPException(status_code=404, detail="Webhook not found")

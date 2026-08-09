@@ -119,6 +119,51 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertTrue(audit["chain"]["valid"])
         self.assertGreaterEqual(audit["chain"]["event_count"], 6)
 
+    def test_monthly_report_contains_only_selected_month_and_rejects_past_expiry(self) -> None:
+        snapshot = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={
+                "period": "2026년",
+                "transactions": [
+                    {"number": 1, "date": "2026-02-28", "description": "2월", "income": 100, "expense": 0, "balance": 1_100},
+                    {"number": 2, "date": "2026-03-01", "description": "3월 수입", "income": 200, "expense": 0, "balance": 1_300},
+                    {"number": 3, "date": "2026-03-02", "description": "3월 지출", "income": 0, "expense": 50, "balance": 1_250},
+                    {"number": 4, "date": "2026-04-01", "description": "4월", "income": 100, "expense": 0, "balance": 1_350},
+                ],
+            },
+        ).json()
+        created = self.client.post(
+            "/monthly-reports",
+            headers=self.headers,
+            json={"month": "2026-03", "snapshot_id": snapshot["id"], "opening_balance": 0},
+        )
+
+        self.assertEqual(created.status_code, 200)
+        stored = main.store.get("monthly_reports", created.json()["report_id"])
+        main.store.update(
+            "monthly_reports",
+            stored["id"],
+            {
+                "transactions": [
+                    *stored["transactions"],
+                    {"number": 4, "date": "2026-04-01", "description": "유출되면 안 되는 4월", "income": 100, "expense": 0, "balance": 1_350},
+                ],
+                "summary": {**stored["summary"], "transaction_count": 999},
+            },
+        )
+        public = self.client.get(f"/public/monthly/{created.json()['share_id']}").json()
+        self.assertEqual(public["month"], "2026년 3월")
+        self.assertEqual([item["description"] for item in public["transactions"]], ["3월 수입", "3월 지출"])
+        self.assertEqual(public["summary"]["opening_balance"], 1_100)
+
+        expired = self.client.post(
+            "/monthly-reports",
+            headers=self.headers,
+            json={"month": "2026-03", "snapshot_id": snapshot["id"], "opening_balance": 0, "expires_at": "2000-01-01T00:00:00Z"},
+        )
+        self.assertEqual(expired.status_code, 422)
+
     def test_google_oauth_state_is_required_and_single_use(self) -> None:
         redirect_uri = "https://atlas.example.com/"
         with patch.dict(os.environ, {"GOOGLE_CLIENT_ID": "test-client"}):
