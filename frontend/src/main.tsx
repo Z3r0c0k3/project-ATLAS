@@ -771,6 +771,11 @@ function App() {
     setAuthReady(true);
   }, [clearSession, run, session, storeSession, token]);
 
+  const redirectToLogin = authReady && (!token || !session) && window.location.pathname !== "/";
+  useEffect(() => {
+    if (redirectToLogin) window.location.replace("/");
+  }, [redirectToLogin]);
+
   async function beginLogin() {
     const redirectUri = `${window.location.origin}/`;
     sessionStorage.setItem("atlas_oauth_flow", "login");
@@ -781,7 +786,7 @@ function App() {
   async function logout() {
     if (token) await api("/auth/logout", token, { method: "POST" }).catch(() => undefined);
     clearSession();
-    window.location.replace("/ledger");
+    window.location.replace("/");
   }
 
   const tabs: Array<{ id: RouteId; href: string; label: string; icon: React.ReactNode }> = [
@@ -792,7 +797,7 @@ function App() {
   ];
   if (session?.role === "admin") tabs.push({ id: "settings", href: "/settings", label: "설정", icon: <Settings size={17} /> });
 
-  if (!authReady) return <main className="login-page"><LoaderCircle className="spin" size={28} /></main>;
+  if (!authReady || redirectToLogin) return <main className="login-page"><LoaderCircle className="spin" size={28} /></main>;
   if (!token || !session) return <main className="login-page"><Toast toast={toast} onClose={() => setToast(null)} /><section className="login-card"><img src="/aegis-logo.svg" alt="Aegis" /><h1>Aegis ATLAS 로그인</h1><p>권한이 부여된 Aegis 운영 계정만 접근할 수 있습니다.</p><button onClick={() => beginLogin().catch(() => undefined)}><ExternalLink size={16} /> Google 계정으로 로그인</button></section></main>;
   const activeRoute = route === "settings" && session.role !== "admin" ? "ledger" : route;
   return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/ledger"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>Aegis ATLAS</p><h1>Aegis Transaction Ledger &amp; Accounting System</h1></div></a><div className="session-state"><span><span className="dot online" />{session.email} · {ROLE_LABELS[session.role]}</span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => logout().catch(() => undefined)}><LogOut size={15} /></button></div></header><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={activeRoute === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{activeRoute === "ledger" ? <LedgerPage token={token} run={run} /> : activeRoute === "snapshots" ? <SnapshotManagementPage token={token} run={run} /> : activeRoute === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : activeRoute === "settings" ? <SettingsPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></main>;
