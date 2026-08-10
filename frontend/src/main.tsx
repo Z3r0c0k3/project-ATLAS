@@ -73,18 +73,19 @@ type ReconciliationResult = {
   unmatched_bank_count: number;
   balance_delta: number | null;
   bank_continuity_failure_count: number;
-  unmatched_ledger: Array<{
-    transaction_id: string;
+  unmatched_ledger?: Array<{
+    transaction_id?: string;
     number: number;
     date: string;
     description: string;
     amount: number;
-    reason: "AMOUNT_MISMATCH" | "DATE_MISMATCH" | "BANK_TRANSACTION_NOT_FOUND";
-    candidate?: { occurred_at: string; description: string; amount: number } | null;
+    reason?: "AMOUNT_MISMATCH" | "DATE_MISMATCH" | "BANK_TRANSACTION_NOT_FOUND";
+    candidate?: { occurred_at?: string; date?: string; description: string; amount: number } | null;
   }>;
-  unmatched_bank: Array<{
+  unmatched_bank?: Array<{
     bank_transaction_id: string;
-    occurred_at: string;
+    occurred_at?: string;
+    date?: string;
     description: string;
     amount: number;
   }>;
@@ -546,6 +547,14 @@ const RECONCILIATION_REASON_LABELS = {
   BANK_TRANSACTION_NOT_FOUND: "계좌 거래 없음",
 };
 
+function reconciliationReason(reason?: keyof typeof RECONCILIATION_REASON_LABELS): string {
+  return reason ? RECONCILIATION_REASON_LABELS[reason] : "거래정보 불일치";
+}
+
+function bankDateTime(item: { occurred_at?: string; date?: string }): string {
+  return String(item.occurred_at || item.date || "일시 미상").replace("T", " ");
+}
+
 function ReconciliationPanel({ token, run, primary, dues }: { token: string; run: Runner; primary: any; dues: any }) {
   const [results, setResults] = useState<Partial<Record<AccountId, ReconciliationResult>>>({});
   const snapshots: Record<AccountId, any> = { primary, dues_intake: dues };
@@ -581,6 +590,8 @@ function ReconciliationPanel({ token, run, primary, dues }: { token: string; run
           const snapshot = snapshots[accountId];
           const result = results[accountId];
           const hasBank = Boolean(snapshot?.source?.bank_transactions?.length);
+          const ledgerMismatches = result?.unmatched_ledger || [];
+          const bankMismatches = result?.unmatched_bank || [];
           return (
             <article key={accountId}>
               <div className="reconciliation-account">
@@ -594,12 +605,12 @@ function ReconciliationPanel({ token, run, primary, dues }: { token: string; run
                   <div><dt>장부 미기록</dt><dd className={result.unmatched_bank_count ? "metric-error" : ""}>{result.unmatched_bank_count}건</dd></div>
                   <div><dt>잔액 차이</dt><dd className={result.balance_delta ? "metric-error" : ""}>{result.balance_delta == null ? "확인 불가" : money(result.balance_delta)}</dd></div>
                 </dl>
-                {result.unmatched_ledger.slice(0, 4).map((item) => <div className="mismatch-row" key={item.transaction_id}>
-                  <div><strong>{item.number}번 · {RECONCILIATION_REASON_LABELS[item.reason]}</strong><span>{item.date} · {item.description} · {money(item.amount)}</span></div>
-                  {item.candidate && <small>계좌 후보: {item.candidate.occurred_at.replace("T", " ")} · {item.candidate.description || "내용 없음"} · {money(item.candidate.amount)}</small>}
+                {ledgerMismatches.slice(0, 4).map((item) => <div className="mismatch-row" key={item.transaction_id || `ledger-${item.number}`}>
+                  <div><strong>{item.number}번 · {reconciliationReason(item.reason)}</strong><span>{item.date} · {item.description} · {money(item.amount)}</span></div>
+                  {item.candidate && <small>계좌 후보: {bankDateTime(item.candidate)} · {item.candidate.description || "내용 없음"} · {money(item.candidate.amount)}</small>}
                 </div>)}
-                {result.unmatched_bank.slice(0, 3).map((item) => <div className="mismatch-row bank-only" key={item.bank_transaction_id}>
-                  <div><strong>장부 미기록 계좌 거래</strong><span>{item.occurred_at.replace("T", " ")} · {item.description || "내용 없음"} · {money(item.amount)}</span></div>
+                {bankMismatches.slice(0, 3).map((item) => <div className="mismatch-row bank-only" key={item.bank_transaction_id}>
+                  <div><strong>장부 미기록 계좌 거래</strong><span>{bankDateTime(item)} · {item.description || "내용 없음"} · {money(item.amount)}</span></div>
                 </div>)}
                 {(result.unmatched_ledger_count > 4 || result.unmatched_bank_count > 3) && <p className="reconciliation-more">나머지 불일치는 동연 패키지의 검증 리포트에서 확인할 수 있습니다.</p>}
               </> : <p className="reconciliation-empty">거래정보 검증을 실행해주세요.</p>}
@@ -902,5 +913,20 @@ function App() {
   return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/ledger"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>Aegis ATLAS</p><h1>Aegis Transaction Ledger &amp; Accounting System</h1></div></a><div className="session-state"><span><span className="dot online" />{session.email} · {ROLE_LABELS[session.role]}</span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => logout().catch(() => undefined)}><LogOut size={15} /></button></div></header><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={activeRoute === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{activeRoute === "ledger" ? <LedgerPage token={token} run={run} /> : activeRoute === "snapshots" ? <SnapshotManagementPage token={token} run={run} /> : activeRoute === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : activeRoute === "settings" ? <SettingsPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></main>;
 }
 
+class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <main className="login-page"><section className="login-card"><img src="/aegis-logo.svg" alt="Aegis" /><h1>페이지를 불러오지 못했습니다</h1><p>화면 데이터 형식이 변경되었거나 일시적인 오류가 발생했습니다.</p><button onClick={() => window.location.reload()}><RefreshCw size={16} /> 다시 불러오기</button></section></main>;
+    }
+    return this.props.children;
+  }
+}
+
 const root = createRoot(document.getElementById("root")!);
-root.render(window.location.pathname.startsWith("/public/monthly/") ? <PublicReport /> : <App />);
+root.render(<AppErrorBoundary>{window.location.pathname.startsWith("/public/monthly/") ? <PublicReport /> : <App />}</AppErrorBoundary>);

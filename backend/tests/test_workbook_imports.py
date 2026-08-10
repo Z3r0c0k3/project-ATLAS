@@ -305,6 +305,19 @@ class WorkbookApiTest(unittest.TestCase):
         self.assertEqual(verified.status_code, 200)
         self.assertEqual(verified.json()["status"], "PASS")
 
+        stale_source = {
+            **main.store.get("ledger_snapshots", result["id"])["source"],
+            "reconciliation": {
+                "status": "ERROR",
+                "unmatched_bank": [{"date": "2026-03-02", "amount": -200}],
+            },
+        }
+        main.store.update("ledger_snapshots", result["id"], {"source": stale_source})
+        refreshed = self.client.get(f"/ledger-snapshots/{result['id']}", headers=self.headers)
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(refreshed.json()["source"]["reconciliation"]["status"], "PASS")
+        self.assertEqual(refreshed.json()["source"]["reconciliation"]["unmatched_bank"], [])
+
     def test_reconciliation_endpoint_requires_bank_transactions(self) -> None:
         snapshot = self.client.post(
             "/ledger-snapshots",

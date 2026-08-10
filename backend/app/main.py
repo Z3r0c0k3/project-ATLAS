@@ -292,7 +292,15 @@ def public_evidence_record(item: dict) -> dict:
 
 
 def public_snapshot_record(snapshot: dict) -> dict:
-    return {**snapshot, "evidence": [public_evidence_record(item) for item in snapshot.get("evidence", [])]}
+    source = snapshot.get("source") or {}
+    reconciliation = snapshot_reconciliation(snapshot)
+    if reconciliation is not None:
+        source = {**source, "reconciliation": reconciliation}
+    return {
+        **snapshot,
+        "source": source,
+        "evidence": [public_evidence_record(item) for item in snapshot.get("evidence", [])],
+    }
 
 
 def snapshot_reconciliation(snapshot: dict) -> dict | None:
