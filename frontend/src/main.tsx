@@ -125,6 +125,17 @@ async function apiBlob(path: string, token: string): Promise<Blob> {
   return response.blob();
 }
 
+function storedSession(): Session | null {
+  try {
+    const session = JSON.parse(sessionStorage.getItem("atlas_session") || "null") as Session | null;
+    const expiresAt = Date.parse(session?.expires_at || "");
+    if (!session?.token || !session.email || !session.role || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null;
+    return session;
+  } catch {
+    return null;
+  }
+}
+
 function Toast({ toast, onClose }: { toast: ToastState | null; onClose: () => void }) {
   if (!toast) return null;
   const Icon = toast.kind === "loading" ? LoaderCircle : toast.kind === "success" ? Check : X;
@@ -688,9 +699,9 @@ function SettingsPage({ token, run }: { token: string; run: Runner }) {
 
 function App() {
   const route = routeFromPath();
-  const [token, setToken] = useState(() => sessionStorage.getItem("atlas_token") || "");
-  const [session, setSession] = useState<Session | null>(null);
-  const [authReady, setAuthReady] = useState(false);
+  const [session, setSession] = useState<Session | null>(() => storedSession());
+  const [token, setToken] = useState(() => session?.token || sessionStorage.getItem("atlas_token") || "");
+  const [authReady, setAuthReady] = useState(() => Boolean(session));
   const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
@@ -713,12 +724,14 @@ function App() {
 
   const storeSession = useCallback((next: Session) => {
     sessionStorage.setItem("atlas_token", next.token);
+    sessionStorage.setItem("atlas_session", JSON.stringify(next));
     setToken(next.token);
     setSession(next);
   }, []);
 
   const clearSession = useCallback(() => {
     sessionStorage.removeItem("atlas_token");
+    sessionStorage.removeItem("atlas_session");
     sessionStorage.removeItem("atlas_oauth_flow");
     setToken("");
     setSession(null);
@@ -728,8 +741,15 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
     const state = params.get("state");
+    if (token && session) {
+      setAuthReady(true);
+      return;
+    }
     if (token) {
-      api<Session>("/auth/me", token).then(setSession).catch(clearSession).finally(() => setAuthReady(true));
+      api<Session>("/auth/me", token).then(storeSession).catch((error) => {
+        clearSession();
+        setToast({ kind: "error", title: "로그인 세션 확인 실패", detail: error instanceof Error ? error.message : "다시 로그인해주세요." });
+      }).finally(() => setAuthReady(true));
       return;
     }
     if (code && state && sessionStorage.getItem("atlas_oauth_flow") === "login") {
@@ -749,7 +769,7 @@ function App() {
       return;
     }
     setAuthReady(true);
-  }, [clearSession, run, storeSession, token]);
+  }, [clearSession, run, session, storeSession, token]);
 
   async function beginLogin() {
     const redirectUri = `${window.location.origin}/`;
