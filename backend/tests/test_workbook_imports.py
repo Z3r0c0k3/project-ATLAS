@@ -146,6 +146,32 @@ class WorkbookServiceTest(unittest.TestCase):
             self.assertIn("증빙자료/receipt_2_영수증.png", archived_names)
             self.assertIn("원본자료/ledger_workbook_원본 장부.xlsx", archived_names)
 
+    def test_reconciliation_reports_amount_and_date_mismatch_candidates(self) -> None:
+        ledger = {
+            "transactions": [
+                {"transaction_id": "carry", "number": 1, "date": "2026-01-01", "description": "이월금", "income": 1_000, "expense": 0, "balance": 1_000},
+                {"transaction_id": "amount", "number": 2, "date": "2026-03-02", "description": "비품", "income": 0, "expense": 200, "balance": 800},
+                {"transaction_id": "date", "number": 3, "date": "2026-03-04", "description": "간식", "income": 0, "expense": 100, "balance": 700},
+            ]
+        }
+        bank = {
+            "transactions": [
+                {"bank_transaction_id": "bank-amount", "occurred_at": "2026-03-02T12:00:00", "date": "2026-03-02", "description": "비품", "amount": -250, "balance": 750, "memo": ""},
+                {"bank_transaction_id": "bank-date", "occurred_at": "2026-03-03T13:00:00", "date": "2026-03-03", "description": "간식", "amount": -100, "balance": 650, "memo": ""},
+            ],
+            "continuity_failures": [],
+        }
+
+        result = reconcile_ledger_bank(ledger, bank)
+
+        self.assertEqual(result["status"], "ERROR")
+        self.assertEqual(result["ledger_transaction_count"], 2)
+        self.assertEqual(result["unmatched_ledger_count"], 2)
+        self.assertEqual(result["unmatched_bank_count"], 2)
+        self.assertEqual([item["reason"] for item in result["unmatched_ledger"]], ["AMOUNT_MISMATCH", "DATE_MISMATCH"])
+        self.assertEqual(result["unmatched_ledger"][0]["candidate"]["amount"], -250)
+        self.assertEqual(result["unmatched_ledger"][1]["candidate"]["occurred_at"], "2026-03-03T13:00:00")
+
 
 class WorkbookApiTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -271,6 +297,34 @@ class WorkbookApiTest(unittest.TestCase):
         self.assertEqual(result["source"]["reconciliation"]["status"], "PASS")
         self.assertEqual(len(result["source"]["bank_transactions"]), 1)
         self.assertEqual(result["source"]["source_files"][0]["kind"], "bank_workbook")
+
+        verified = self.client.get(
+            f"/ledger-snapshots/{result['id']}/reconciliation",
+            headers=self.headers,
+        )
+        self.assertEqual(verified.status_code, 200)
+        self.assertEqual(verified.json()["status"], "PASS")
+
+    def test_reconciliation_endpoint_requires_bank_transactions(self) -> None:
+        snapshot = self.client.post(
+            "/ledger-snapshots",
+            headers=self.headers,
+            json={
+                "account_id": "primary",
+                "period": "2026년 1학기",
+                "transactions": [
+                    {"number": 1, "date": "2026-03-01", "description": "이월금", "income": 1_000, "expense": 0, "balance": 1_000},
+                ],
+            },
+        ).json()
+
+        response = self.client.get(
+            f"/ledger-snapshots/{snapshot['id']}/reconciliation",
+            headers=self.headers,
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("계좌 거래내역", response.json()["detail"])
 
 
 if __name__ == "__main__":

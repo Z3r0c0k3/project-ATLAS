@@ -335,8 +335,18 @@ def _subset_sum(candidates: list[dict], target: int) -> list[dict] | None:
 def reconcile_ledger_bank(ledger: dict, bank: dict) -> dict:
     ledger_rows = ledger["transactions"]
     bank_rows = bank["transactions"]
+    comparable_ledger = [
+        item
+        for item in ledger_rows
+        if (item["income"] or item["expense"]) and "이월" not in item["description"]
+    ]
     cutoff = max(_parse_date(item["date"]) for item in ledger_rows)
-    eligible_bank = [item for item in bank_rows if _parse_date(item["occurred_at"]) <= cutoff.replace(hour=23, minute=59, second=59)]
+    period_start = min(_parse_date(item["date"]) for item in ledger_rows)
+    eligible_bank = [
+        item
+        for item in bank_rows
+        if period_start.date() <= _parse_date(item["occurred_at"]).date() <= cutoff.date()
+    ]
     available = {item["bank_transaction_id"]: item for item in eligible_bank}
     matches: list[dict] = []
     unmatched_ledger: list[dict] = []
@@ -352,14 +362,13 @@ def reconcile_ledger_bank(ledger: dict, bank: dict) -> dict:
                 "method": method,
                 "confidence": confidence,
                 "amount": ledger_row["income"] or -ledger_row["expense"],
+                "ledger_date": ledger_row["date"],
+                "bank_occurred_at": [item["occurred_at"] for item in bank_matches],
             }
         )
 
-    for ledger_row in ledger_rows:
+    for ledger_row in comparable_ledger:
         signed_amount = ledger_row["income"] or -ledger_row["expense"]
-        if not signed_amount or "이월" in ledger_row["description"]:
-            unmatched_ledger.append(ledger_row)
-            continue
         exact = [
             item
             for item in available.values()
@@ -392,7 +401,27 @@ def reconcile_ledger_bank(ledger: dict, bank: dict) -> dict:
             if grouped and len(grouped) > 1:
                 consume(ledger_row, grouped, "period_aggregate", "medium")
                 continue
-        unmatched_ledger.append(ledger_row)
+
+        same_date = [
+            item
+            for item in available.values()
+            if item["date"] == ledger_row["date"] and (item["amount"] > 0) == (signed_amount > 0)
+        ]
+        same_amount = [
+            item
+            for item in available.values()
+            if item["amount"] == signed_amount
+        ]
+        candidate = None
+        reason = "BANK_TRANSACTION_NOT_FOUND"
+        if same_date:
+            candidate = min(same_date, key=lambda item: abs(item["amount"] - signed_amount))
+            reason = "AMOUNT_MISMATCH"
+        elif same_amount:
+            ledger_day = _parse_date(ledger_row["date"]).date()
+            candidate = min(same_amount, key=lambda item: abs((_parse_date(item["date"]).date() - ledger_day).days))
+            reason = "DATE_MISMATCH"
+        unmatched_ledger.append({**ledger_row, "reason": reason, "candidate": candidate})
 
     bank_at_cutoff = eligible_bank[-1]["balance"] if eligible_bank else None
     ledger_closing = ledger_rows[-1]["balance"] if ledger_rows else ledger.get("opening_balance", 0)
@@ -402,14 +431,14 @@ def reconcile_ledger_bank(ledger: dict, bank: dict) -> dict:
         for issue in bank.get("continuity_failures", [])
         if issue["transaction_id"] in {item["bank_transaction_id"] for item in eligible_bank}
     ]
-    status = "PASS" if balance_delta == 0 and not continuity_failures else "ERROR"
+    status = "PASS" if balance_delta == 0 and not continuity_failures and not unmatched_ledger and not available else "ERROR"
     return {
         "status": status,
         "cutoff_date": cutoff.date().isoformat(),
         "ledger_closing_balance": ledger_closing,
         "bank_closing_balance": bank_at_cutoff,
         "balance_delta": balance_delta,
-        "ledger_transaction_count": len(ledger_rows),
+        "ledger_transaction_count": len(comparable_ledger),
         "bank_transaction_count": len(eligible_bank),
         "matched_ledger_count": len(matches),
         "matched_bank_count": sum(len(item["bank_transaction_ids"]) for item in matches),
@@ -424,12 +453,25 @@ def reconcile_ledger_bank(ledger: dict, bank: dict) -> dict:
                 "date": item["date"],
                 "description": item["description"],
                 "amount": item["income"] or -item["expense"],
+                "reason": item["reason"],
+                "candidate": (
+                    {
+                        "bank_transaction_id": item["candidate"]["bank_transaction_id"],
+                        "occurred_at": item["candidate"]["occurred_at"],
+                        "date": item["candidate"]["date"],
+                        "description": item["candidate"]["description"],
+                        "amount": item["candidate"]["amount"],
+                    }
+                    if item["candidate"]
+                    else None
+                ),
             }
             for item in unmatched_ledger
         ],
         "unmatched_bank": [
             {
                 "bank_transaction_id": item["bank_transaction_id"],
+                "occurred_at": item["occurred_at"],
                 "date": item["date"],
                 "description": item["description"],
                 "amount": item["amount"],

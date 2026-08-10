@@ -9,7 +9,7 @@ from .naming import normalize_filename
 from .integrity import canonical_sha256
 
 
-VALIDATION_RULE_VERSION = "atlas-ledger-v1.3"
+VALIDATION_RULE_VERSION = "atlas-ledger-v1.4"
 CARD_EVIDENCE_METHODS = frozenset({"카드결제", "카드결제취소"})
 REQUIRED_EVIDENCE_KINDS = frozenset({"receipt", "explanation"})
 
@@ -330,6 +330,50 @@ def validate_ledger(
         )
     if reconciliation and reconciliation.get("bank_continuity_failure_count", 0):
         issues.append(ValidationIssue("BANK_BALANCE_CONTINUITY", "ERROR", "ERROR", "은행 거래내역의 거래 후 잔액 연속성이 올바르지 않습니다."))
+    if reconciliation and reconciliation.get("unmatched_ledger_count", 0):
+        unmatched_ledger = reconciliation.get("unmatched_ledger") or []
+        if not unmatched_ledger:
+            unmatched_ledger = [{"number": None, "transaction_id": None, "reason": None}]
+        reason_labels = {
+            "AMOUNT_MISMATCH": "같은 결제일의 계좌 거래와 금액이 다릅니다",
+            "DATE_MISMATCH": "같은 금액의 계좌 거래와 결제일이 다릅니다",
+            "BANK_TRANSACTION_NOT_FOUND": "금액과 결제일이 일치하는 계좌 거래를 찾지 못했습니다",
+        }
+        for item in unmatched_ledger:
+            number = item.get("number")
+            prefix = f"장부 {number}번 거래는 " if number is not None else f"장부 {int(reconciliation['unmatched_ledger_count']):,}건에 "
+            issues.append(
+                ValidationIssue(
+                    "BANK_LEDGER_TRANSACTION_MISMATCH",
+                    "ERROR",
+                    "ERROR",
+                    prefix + reason_labels.get(item.get("reason"), "금액과 결제일이 일치하는 계좌 거래내역이 없습니다"),
+                    transaction_id=item.get("transaction_id"),
+                    transaction_number=number,
+                )
+            )
+    if reconciliation and reconciliation.get("unmatched_bank_count", 0):
+        unmatched_bank = reconciliation.get("unmatched_bank") or []
+        if unmatched_bank:
+            for item in unmatched_bank:
+                occurred_at = str(item.get("occurred_at") or item.get("date") or "일시 미상").replace("T", " ")
+                issues.append(
+                    ValidationIssue(
+                        "UNRECORDED_BANK_TRANSACTION",
+                        "ERROR",
+                        "ERROR",
+                        f"{occurred_at} 계좌 거래 {int(item.get('amount') or 0):,}원이 장부에 기록되지 않았습니다.",
+                    )
+                )
+        else:
+            issues.append(
+                ValidationIssue(
+                    "UNRECORDED_BANK_TRANSACTION",
+                    "ERROR",
+                    "ERROR",
+                    f"계좌 거래내역 {int(reconciliation['unmatched_bank_count']):,}건이 장부에 기록되지 않았습니다.",
+                )
+            )
 
     error_count = sum(1 for item in issues if item.severity == "ERROR")
     warning_count = sum(1 for item in issues if item.severity == "WARNING")

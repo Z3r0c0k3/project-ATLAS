@@ -892,6 +892,8 @@ def generate_combined_validation_report(output_path: Path, validation: dict, acc
       <tr><th>은행 마감잔액</th><td>{int(reconciliation.get('bank_closing_balance') or 0):,}원</td></tr>
       <tr><th>잔액 차이</th><td>{int(reconciliation.get('balance_delta') or 0):,}원</td></tr>
       <tr><th>자동 매칭</th><td>장부 {int(reconciliation.get('matched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('matched_bank_count') or 0):,}건</td></tr>"""
+            reconciliation_rows += f"""
+      <tr><th>거래정보 불일치</th><td>장부 {int(reconciliation.get('unmatched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('unmatched_bank_count') or 0):,}건</td></tr>"""
         sections.append(
             f"""
     <section>

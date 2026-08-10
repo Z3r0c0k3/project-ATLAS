@@ -295,6 +295,20 @@ def public_snapshot_record(snapshot: dict) -> dict:
     return {**snapshot, "evidence": [public_evidence_record(item) for item in snapshot.get("evidence", [])]}
 
 
+def snapshot_reconciliation(snapshot: dict) -> dict | None:
+    source = snapshot.get("source") or {}
+    bank_transactions = source.get("bank_transactions") or []
+    if not bank_transactions:
+        return None
+    return reconcile_ledger_bank(
+        {"transactions": snapshot.get("transactions") or []},
+        {
+            "transactions": bank_transactions,
+            "continuity_failures": source.get("bank_continuity_failures") or [],
+        },
+    )
+
+
 def create_snapshot_revision(
     current: dict,
     transactions: list[dict],
@@ -1134,6 +1148,20 @@ def get_ledger_snapshot(
     return public_snapshot_record(snapshot)
 
 
+@app.get("/ledger-snapshots/{snapshot_id}/reconciliation")
+def verify_snapshot_bank_transactions(
+    snapshot_id: str,
+    session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
+) -> dict:
+    snapshot = store.get("ledger_snapshots", snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
+    reconciliation = snapshot_reconciliation(snapshot)
+    if reconciliation is None:
+        raise HTTPException(status_code=422, detail="검증할 계좌 거래내역을 먼저 등록해주세요.")
+    return reconciliation
+
+
 @app.post("/ledger-snapshots/{snapshot_id}/revision")
 def create_manual_snapshot_revision(
     snapshot_id: str,
@@ -1428,7 +1456,7 @@ def create_submission_package(
                     "transactions": normalize_transactions(latest_snapshots["primary"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["primary"]["evidence"]),
                     "bank_transactions": (latest_snapshots["primary"].get("source") or {}).get("bank_transactions", []),
-                    "reconciliation": (latest_snapshots["primary"].get("source") or {}).get("reconciliation"),
+                    "reconciliation": snapshot_reconciliation(latest_snapshots["primary"]),
                     "source_files": (latest_snapshots["primary"].get("source") or {}).get("source_files", []),
                 },
                 "dues_intake": {
@@ -1441,7 +1469,7 @@ def create_submission_package(
                     "transactions": normalize_transactions(latest_snapshots["dues_intake"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["dues_intake"]["evidence"]),
                     "bank_transactions": (latest_snapshots["dues_intake"].get("source") or {}).get("bank_transactions", []),
-                    "reconciliation": (latest_snapshots["dues_intake"].get("source") or {}).get("reconciliation"),
+                    "reconciliation": snapshot_reconciliation(latest_snapshots["dues_intake"]),
                     "source_files": (latest_snapshots["dues_intake"].get("source") or {}).get("source_files", []),
                 },
             }
@@ -1478,7 +1506,7 @@ def create_submission_package(
                 payload_data.get("period_start"),
                 payload_data.get("period_end"),
                 latest_snapshot.get("source", {}).get("bank_transactions", []),
-                latest_snapshot.get("source", {}).get("reconciliation"),
+                snapshot_reconciliation(latest_snapshot),
                 latest_snapshot.get("source", {}).get("source_files", []),
             )
         updated = store.update(

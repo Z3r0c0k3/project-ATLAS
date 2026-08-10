@@ -64,6 +64,22 @@ class AccountingValidationTest(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertNotIn("MISSING_CARD_EVIDENCE", {issue["code"] for issue in result["issues"]})
 
+    def test_unmatched_ledger_and_bank_transactions_are_errors(self) -> None:
+        transactions = [Transaction(1, "2026-03-02", "비품", 0, 30_000, 970_000)]
+        reconciliation = {
+            "balance_delta": 0,
+            "bank_continuity_failure_count": 0,
+            "unmatched_ledger_count": 1,
+            "unmatched_bank_count": 2,
+        }
+
+        result = validate_ledger(1_000_000, transactions, [], 970_000, reconciliation=reconciliation)
+        codes = {issue["code"] for issue in result["issues"]}
+
+        self.assertEqual(result["status"], "ERROR")
+        self.assertIn("BANK_LEDGER_TRANSACTION_MISMATCH", codes)
+        self.assertIn("UNRECORDED_BANK_TRANSACTION", codes)
+
     def test_evidence_with_same_number_from_other_account_does_not_match(self) -> None:
         transactions = [
             Transaction(

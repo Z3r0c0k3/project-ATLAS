@@ -63,6 +63,32 @@ type EvidenceFile = {
 };
 
 type EvidencePreview = EvidenceFile & { url: string };
+type ReconciliationResult = {
+  status: "PASS" | "ERROR";
+  cutoff_date: string;
+  ledger_transaction_count: number;
+  bank_transaction_count: number;
+  matched_ledger_count: number;
+  unmatched_ledger_count: number;
+  unmatched_bank_count: number;
+  balance_delta: number | null;
+  bank_continuity_failure_count: number;
+  unmatched_ledger: Array<{
+    transaction_id: string;
+    number: number;
+    date: string;
+    description: string;
+    amount: number;
+    reason: "AMOUNT_MISMATCH" | "DATE_MISMATCH" | "BANK_TRANSACTION_NOT_FOUND";
+    candidate?: { occurred_at: string; description: string; amount: number } | null;
+  }>;
+  unmatched_bank: Array<{
+    bank_transaction_id: string;
+    occurred_at: string;
+    description: string;
+    amount: number;
+  }>;
+};
 
 const ACCOUNT_LABELS: Record<AccountId, string> = {
   primary: "동아리운영계좌(토스뱅크)",
@@ -382,6 +408,7 @@ function LedgerPage({ token, run }: { token: string; run: Runner }) {
         </div>
       </div>
     </section>
+    <ReconciliationPanel token={token} run={run} primary={workspace.primarySnapshot} dues={workspace.duesSnapshot} />
     <section className="panel transaction-panel">
       <div className="panel-heading"><div><p className="eyebrow">TRANSACTIONS</p><h3>거래 목록</h3></div><select className="inline-select" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as AccountId | "all")}><option value="all">전체 계좌</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></div>
       <TransactionTable rows={rows} accountFilter={accountFilter} evidenceById={evidenceById} onPreviewEvidence={(items) => openEvidencePreview(items).catch(() => undefined)} />
@@ -493,6 +520,7 @@ function PackagePage({ token, run }: { token: string; run: Runner }) {
       <select aria-label="업로드 계좌 분류" value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">운영계좌</option><option value="dues_intake">회비계좌</option></select>
       <label className="file-button"><Upload size={16} /> 일괄 등록<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
     </section>
+    <ReconciliationPanel token={token} run={run} primary={primary} dues={dues} />
     <section className="workspace-grid package-controls">
       <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DETAILS</p><h3>제출 정보</h3></div></div><div className="form-grid"><label>동아리명<input value={clubName} onChange={(event) => setClubName(event.target.value)} /></label><label>회계 기간<input value={semester} onChange={(event) => setSemester(event.target.value)} /></label><label>회계담당자<input value={treasurerName} onChange={(event) => setTreasurerName(event.target.value)} /></label><label>회장<input value={presidentName} onChange={(event) => setPresidentName(event.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} /></label><label>시작일<input value={PERIOD_START} disabled /></label></div></div>
       <div className="panel job-panel"><div className="panel-heading"><div><p className="eyebrow">STATUS</p><h3>현재 작업</h3></div>{job?.status && <StatusBadge value={job.status} />}</div>{packageData?.validation ? <><div className="validation-summary"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div><dl className="coverage"><div><dt>운영 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.primary?.transaction_rows || 0}건</dd></div><div><dt>회비 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.dues_intake?.transaction_rows || 0}건</dd></div><div><dt>운영 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.primary?.embedded_files || 0}개</dd></div><div><dt>회비 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.dues_intake?.embedded_files || 0}개</dd></div></dl></> : <p className="muted">두 계좌의 준비 상태를 확인한 뒤 패키지를 생성합니다.</p>}</div>
@@ -510,6 +538,77 @@ function AccountReadiness({ accountId, snapshot, historyCount }: { accountId: Ac
   const ready = Boolean(snapshot?.id && historyCount);
   const evidence = (snapshot?.evidence || []).filter((item: any) => item.kind !== "account_capture" && item.preview_available).length;
   return <article className={ready ? "ready" : ""}><div className="readiness-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={ready ? "READY" : "REQUIRED"} /></div><dl><div><dt>장부</dt><dd>{snapshot?.transactions?.length ? `${snapshot.transactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{evidence}개</dd></div><div><dt>계좌 전체내역</dt><dd>{historyCount ? `${historyCount}개` : "필요"}</dd></div></dl></article>;
+}
+
+const RECONCILIATION_REASON_LABELS = {
+  AMOUNT_MISMATCH: "금액 불일치",
+  DATE_MISMATCH: "결제일 불일치",
+  BANK_TRANSACTION_NOT_FOUND: "계좌 거래 없음",
+};
+
+function ReconciliationPanel({ token, run, primary, dues }: { token: string; run: Runner; primary: any; dues: any }) {
+  const [results, setResults] = useState<Partial<Record<AccountId, ReconciliationResult>>>({});
+  const snapshots: Record<AccountId, any> = { primary, dues_intake: dues };
+
+  useEffect(() => {
+    setResults({
+      primary: primary?.source?.reconciliation,
+      dues_intake: dues?.source?.reconciliation,
+    });
+  }, [primary?.id, dues?.id]);
+
+  async function verify() {
+    const available = (Object.entries(snapshots) as [AccountId, any][]).filter(([, snapshot]) => snapshot?.id && snapshot?.source?.bank_transactions?.length);
+    const verified = await run("장부·계좌 거래정보 검증", async () => {
+      if (!available.length) throw new Error("계좌 거래내역을 먼저 등록해주세요.");
+      const entries = await Promise.all(available.map(async ([accountId, snapshot]) => [
+        accountId,
+        await api<ReconciliationResult>(`/ledger-snapshots/${snapshot.id}/reconciliation`, token),
+      ] as const));
+      return Object.fromEntries(entries) as Partial<Record<AccountId, ReconciliationResult>>;
+    });
+    if (verified) setResults((current) => ({ ...current, ...verified }));
+  }
+
+  return (
+    <section className="panel reconciliation-panel">
+      <div className="panel-heading reconciliation-heading">
+        <div><p className="eyebrow">RECONCILIATION</p><h3>장부·계좌 거래정보 검증</h3><p className="muted">장부 날짜와 계좌 거래 일시의 날짜, 수입·지출 금액을 계좌별로 대조합니다.</p></div>
+        <button className="secondary" onClick={() => verify().catch(() => undefined)}><RefreshCw size={16} /> 다시 검증</button>
+      </div>
+      <div className="reconciliation-grid">
+        {(["primary", "dues_intake"] as AccountId[]).map((accountId) => {
+          const snapshot = snapshots[accountId];
+          const result = results[accountId];
+          const hasBank = Boolean(snapshot?.source?.bank_transactions?.length);
+          return (
+            <article key={accountId}>
+              <div className="reconciliation-account">
+                <div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><strong>{ACCOUNT_LABELS[accountId]}</strong></div>
+                <StatusBadge value={result?.status || (hasBank ? "REQUIRED" : "NOT READY")} />
+              </div>
+              {!snapshot?.id ? <p className="reconciliation-empty">Google Sheets 장부를 먼저 연결해주세요.</p> : !hasBank ? <p className="reconciliation-empty">이 계좌의 거래내역 파일을 먼저 등록해주세요.</p> : result ? <>
+                <dl className="reconciliation-metrics">
+                  <div><dt>자동 매칭</dt><dd>{result.matched_ledger_count}/{result.ledger_transaction_count}건</dd></div>
+                  <div><dt>장부 불일치</dt><dd className={result.unmatched_ledger_count ? "metric-error" : ""}>{result.unmatched_ledger_count}건</dd></div>
+                  <div><dt>장부 미기록</dt><dd className={result.unmatched_bank_count ? "metric-error" : ""}>{result.unmatched_bank_count}건</dd></div>
+                  <div><dt>잔액 차이</dt><dd className={result.balance_delta ? "metric-error" : ""}>{result.balance_delta == null ? "확인 불가" : money(result.balance_delta)}</dd></div>
+                </dl>
+                {result.unmatched_ledger.slice(0, 4).map((item) => <div className="mismatch-row" key={item.transaction_id}>
+                  <div><strong>{item.number}번 · {RECONCILIATION_REASON_LABELS[item.reason]}</strong><span>{item.date} · {item.description} · {money(item.amount)}</span></div>
+                  {item.candidate && <small>계좌 후보: {item.candidate.occurred_at.replace("T", " ")} · {item.candidate.description || "내용 없음"} · {money(item.candidate.amount)}</small>}
+                </div>)}
+                {result.unmatched_bank.slice(0, 3).map((item) => <div className="mismatch-row bank-only" key={item.bank_transaction_id}>
+                  <div><strong>장부 미기록 계좌 거래</strong><span>{item.occurred_at.replace("T", " ")} · {item.description || "내용 없음"} · {money(item.amount)}</span></div>
+                </div>)}
+                {(result.unmatched_ledger_count > 4 || result.unmatched_bank_count > 3) && <p className="reconciliation-more">나머지 불일치는 동연 패키지의 검증 리포트에서 확인할 수 있습니다.</p>}
+              </> : <p className="reconciliation-empty">거래정보 검증을 실행해주세요.</p>}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function snapshotSourceLabel(snapshot: any): string {
