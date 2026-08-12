@@ -70,8 +70,7 @@ from .services.workbooks import (
     is_ibk_bank_pdf,
     parse_aegis_ledger,
     parse_ibk_bank_pdf,
-    parse_toss_bank,
-    reconcile_ledger_bank,
+    parse_woori_bank,
     workbook_preview,
 )
 
@@ -114,6 +113,16 @@ def normalize_email(value: str) -> str:
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(status_code=422, detail="올바른 이메일 주소를 입력해주세요.")
     return email
+
+
+def parse_bank_upload(path: Path, account_id: str) -> dict:
+    if account_id == "dues_intake":
+        if not is_ibk_bank_pdf(path):
+            raise WorkbookParseError("회비입금계좌(IBK기업은행)에는 IBK 거래내역 PDF만 연결할 수 있습니다.")
+        return parse_ibk_bank_pdf(path)
+    if path.suffix.lower() == ".pdf":
+        raise WorkbookParseError("동아리운영계좌(우리은행)에는 우리은행 .xls, .xlsx 또는 .xlsm 파일만 연결할 수 있습니다.")
+    return parse_woori_bank(path)
 
 
 def access_member(email: str) -> dict | None:
@@ -246,7 +255,6 @@ def snapshot_summary(snapshot: dict) -> dict:
         "source": snapshot.get("source"),
         "imported_by": snapshot.get("imported_by"),
         "created_at": snapshot.get("created_at"),
-        "reconciliation": (snapshot.get("source") or {}).get("reconciliation"),
     }
 
 
@@ -264,7 +272,7 @@ def evidence_transaction_number_from_filename(filename: str) -> tuple[int | None
     lowered = stem.lower().replace(" ", "")
     if any(marker in lowered for marker in ("기업은행", "회비입금", "ibk")):
         return None, "filename_account_hint", "dues_intake"
-    if any(marker in lowered for marker in ("토스뱅크", "운영계좌", "toss")):
+    if any(marker in lowered for marker in ("우리은행", "운영계좌", "woori")):
         return None, "filename_account_hint", "primary"
     return None, "unmatched", None
 
@@ -292,29 +300,10 @@ def public_evidence_record(item: dict) -> dict:
 
 
 def public_snapshot_record(snapshot: dict) -> dict:
-    source = snapshot.get("source") or {}
-    reconciliation = snapshot_reconciliation(snapshot)
-    if reconciliation is not None:
-        source = {**source, "reconciliation": reconciliation}
     return {
         **snapshot,
-        "source": source,
         "evidence": [public_evidence_record(item) for item in snapshot.get("evidence", [])],
     }
-
-
-def snapshot_reconciliation(snapshot: dict) -> dict | None:
-    source = snapshot.get("source") or {}
-    bank_transactions = source.get("bank_transactions") or []
-    if not bank_transactions:
-        return None
-    return reconcile_ledger_bank(
-        {"transactions": snapshot.get("transactions") or []},
-        {
-            "transactions": bank_transactions,
-            "continuity_failures": source.get("bank_continuity_failures") or [],
-        },
-    )
 
 
 def create_snapshot_revision(
@@ -908,7 +897,7 @@ def upload_import(
     target, size = persist_upload(file)
     analysis = None
     parse_error = None
-    if target.suffix.lower() in {".xlsx", ".xlsm"}:
+    if target.suffix.lower() in {".xls", ".xlsx", ".xlsm"}:
         try:
             analysis = workbook_preview(target)
         except WorkbookParseError as exc:
@@ -1049,19 +1038,13 @@ def create_workbook_snapshot(
         transaction["evidence_ids"] = evidence_by_number.get(transaction["number"], [])
 
     bank = None
-    reconciliation = None
     bank_upload = None
     if payload.bank_upload_id:
         bank_upload = store.get("uploads", payload.bank_upload_id)
         if not bank_upload:
             raise HTTPException(status_code=404, detail="Bank upload not found")
         try:
-            bank_path = Path(bank_upload["path"])
-            if is_ibk_bank_pdf(bank_path):
-                bank = parse_ibk_bank_pdf(bank_path)
-            else:
-                bank = parse_toss_bank(bank_path)
-            reconciliation = reconcile_ledger_bank(ledger, bank)
+            bank = parse_bank_upload(Path(bank_upload["path"]), payload.account_id)
         except WorkbookParseError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1099,10 +1082,8 @@ def create_workbook_snapshot(
         {
             "source_files": source_files,
             "ledger_summary": {key: value for key, value in ledger.items() if key != "transactions"},
-            "bank_summary": {key: value for key, value in (bank or {}).items() if key not in {"transactions", "continuity_failures"}} or None,
+            "bank_summary": {key: value for key, value in (bank or {}).items() if key != "transactions"} or None,
             "bank_transactions": (bank or {}).get("transactions", []),
-            "bank_continuity_failures": (bank or {}).get("continuity_failures", []),
-            "reconciliation": reconciliation,
         },
     )
     audit(
@@ -1110,7 +1091,7 @@ def create_workbook_snapshot(
         "workbook.imported",
         "ledger_snapshot",
         snapshot["id"],
-        after={"ledger_upload_id": ledger_upload["id"], "bank_upload_id": payload.bank_upload_id, "reconciliation": reconciliation},
+        after={"ledger_upload_id": ledger_upload["id"], "bank_upload_id": payload.bank_upload_id},
         request=request,
     )
     return {
@@ -1118,8 +1099,7 @@ def create_workbook_snapshot(
         "transactions": snapshot["transactions"],
         "evidence": snapshot["evidence"],
         "ledger": {key: value for key, value in ledger.items() if key != "transactions"},
-        "bank": {key: value for key, value in (bank or {}).items() if key not in {"transactions", "continuity_failures"}} or None,
-        "reconciliation": reconciliation,
+        "bank": {key: value for key, value in (bank or {}).items() if key != "transactions"} or None,
     }
 
 
@@ -1154,20 +1134,6 @@ def get_ledger_snapshot(
     if not snapshot:
         raise HTTPException(status_code=404, detail="Ledger snapshot not found")
     return public_snapshot_record(snapshot)
-
-
-@app.get("/ledger-snapshots/{snapshot_id}/reconciliation")
-def verify_snapshot_bank_transactions(
-    snapshot_id: str,
-    session: dict = Depends(require_roles(Role.admin, Role.accountant, Role.president, Role.reviewer)),
-) -> dict:
-    snapshot = store.get("ledger_snapshots", snapshot_id)
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
-    reconciliation = snapshot_reconciliation(snapshot)
-    if reconciliation is None:
-        raise HTTPException(status_code=422, detail="검증할 계좌 거래내역을 먼저 등록해주세요.")
-    return reconciliation
 
 
 @app.post("/ledger-snapshots/{snapshot_id}/revision")
@@ -1350,8 +1316,7 @@ def attach_snapshot_bank_transactions(
         raise HTTPException(status_code=422, detail="은행 거래내역을 연결할 장부 거래가 없습니다.")
     bank_path = Path(upload["path"])
     try:
-        bank = parse_ibk_bank_pdf(bank_path) if is_ibk_bank_pdf(bank_path) else parse_toss_bank(bank_path)
-        reconciliation = reconcile_ledger_bank({"transactions": current["transactions"]}, bank)
+        bank = parse_bank_upload(bank_path, current["account_id"])
     except WorkbookParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     source_files = [
@@ -1375,10 +1340,8 @@ def attach_snapshot_bank_transactions(
         {"action": "bank_transactions.attached", "upload_id": upload["id"]},
         {
             "source_files": source_files,
-            "bank_summary": {key: value for key, value in bank.items() if key not in {"transactions", "continuity_failures"}},
+            "bank_summary": {key: value for key, value in bank.items() if key != "transactions"},
             "bank_transactions": bank.get("transactions", []),
-            "bank_continuity_failures": bank.get("continuity_failures", []),
-            "reconciliation": reconciliation,
         },
     )
     audit(
@@ -1387,7 +1350,7 @@ def attach_snapshot_bank_transactions(
         "ledger_snapshot",
         created["id"],
         before={"parent_snapshot_id": snapshot_id},
-        after={"upload_id": upload["id"], "reconciliation": reconciliation},
+        after={"upload_id": upload["id"]},
         request=request,
     )
     return public_snapshot_record(created)
@@ -1405,7 +1368,7 @@ def create_submission_package(
 ) -> PackageJobResponse:
     combined = bool(payload.primary_snapshot_id or payload.dues_snapshot_id)
     if combined and not (payload.primary_snapshot_id and payload.dues_snapshot_id):
-        raise HTTPException(status_code=422, detail="통합 동연 패키지에는 동아리운영계좌(토스뱅크)와 회비입금계좌(IBK기업은행) 스냅샷이 모두 필요합니다.")
+        raise HTTPException(status_code=422, detail="통합 동연 패키지에는 동아리운영계좌(우리은행)와 회비입금계좌(IBK기업은행) 스냅샷이 모두 필요합니다.")
     if combined:
         snapshots = {
             "primary": store.get("ledger_snapshots", payload.primary_snapshot_id),
@@ -1464,7 +1427,6 @@ def create_submission_package(
                     "transactions": normalize_transactions(latest_snapshots["primary"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["primary"]["evidence"]),
                     "bank_transactions": (latest_snapshots["primary"].get("source") or {}).get("bank_transactions", []),
-                    "reconciliation": snapshot_reconciliation(latest_snapshots["primary"]),
                     "source_files": (latest_snapshots["primary"].get("source") or {}).get("source_files", []),
                 },
                 "dues_intake": {
@@ -1477,7 +1439,6 @@ def create_submission_package(
                     "transactions": normalize_transactions(latest_snapshots["dues_intake"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["dues_intake"]["evidence"]),
                     "bank_transactions": (latest_snapshots["dues_intake"].get("source") or {}).get("bank_transactions", []),
-                    "reconciliation": snapshot_reconciliation(latest_snapshots["dues_intake"]),
                     "source_files": (latest_snapshots["dues_intake"].get("source") or {}).get("source_files", []),
                 },
             }
@@ -1514,7 +1475,6 @@ def create_submission_package(
                 payload_data.get("period_start"),
                 payload_data.get("period_end"),
                 latest_snapshot.get("source", {}).get("bank_transactions", []),
-                snapshot_reconciliation(latest_snapshot),
                 latest_snapshot.get("source", {}).get("source_files", []),
             )
         updated = store.update(

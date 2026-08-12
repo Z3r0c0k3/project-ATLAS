@@ -18,7 +18,7 @@ from app.services.accounting import Evidence, Transaction
 from app.services.documents import build_submission_package
 from app.services.jobs import JobRunner
 from app.services.store import JsonStore
-from app.services.workbooks import parse_aegis_ledger, parse_toss_bank, reconcile_ledger_bank
+from app.services.workbooks import parse_aegis_ledger, parse_woori_bank
 
 
 def make_ledger(path: Path, transaction_count: int = 2) -> None:
@@ -52,18 +52,24 @@ def make_ledger(path: Path, transaction_count: int = 2) -> None:
 def make_bank(path: Path) -> None:
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "토스뱅크 거래내역"
-    headers = ["거래 일시", "적요", "거래 유형", "거래 기관", "계좌번호", "거래 금액", "거래 후 잔액", "메모"]
-    for index, value in enumerate(headers, 2):
-        sheet.cell(9, index, value)
-    values = [datetime(2026, 3, 2, 12, 0), "테스트상점", "체크카드결제", "", "", -200, 800, "물품 1"]
-    for column, value in enumerate(values, 2):
-        sheet.cell(10, column, value)
+    sheet.title = "sheet"
+    sheet.cell(2, 1, "계좌번호 : 1002-000-000000")
+    sheet.cell(3, 1, "조회기간 : 2026.01.01 ~ 2026.12.31")
+    headers = ["No.", "거래일시", "적요", "기재내용", "찾으신금액", "맡기신금액", "거래후 잔액", "취급기관", "메모"]
+    for index, value in enumerate(headers, 1):
+        sheet.cell(4, index, value)
+    rows = [
+        [1, "2026.03.02 12:00", "체크우리", "테스트상점", 200, 0, 800, "카드", "물품 1"],
+        [2, "2026.03.01 09:30", "인터넷", "이월금", 0, 1_000, 1_000, "우리은행", ""],
+    ]
+    for row, values in enumerate(rows, 5):
+        for column, value in enumerate(values, 1):
+            sheet.cell(row, column, value)
     workbook.save(path)
 
 
 class WorkbookServiceTest(unittest.TestCase):
-    def test_parse_reconcile_and_never_truncate_documents(self) -> None:
+    def test_parse_woori_and_never_truncate_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ledger_path = root / "ledger.xlsx"
@@ -83,12 +89,13 @@ class WorkbookServiceTest(unittest.TestCase):
             pdf.close()
 
             ledger = parse_aegis_ledger(ledger_path, period="2026년 1학기")
-            bank = parse_toss_bank(bank_path)
+            bank = parse_woori_bank(bank_path)
             self.assertEqual(ledger["transactions"][1]["processing_method"], "카드결제")
             self.assertEqual(ledger["transactions"][1]["details"], "결제처: 테스트상점")
-            reconciliation = reconcile_ledger_bank({**ledger, "transactions": ledger["transactions"][:2]}, bank)
-            self.assertEqual(reconciliation["status"], "PASS")
-            self.assertEqual(reconciliation["balance_delta"], 0)
+            self.assertEqual(bank["kind"], "woori_bank")
+            self.assertEqual([item["amount"] for item in bank["transactions"]], [1_000, -200])
+            self.assertEqual(bank["transactions"][0]["occurred_at"], "2026-03-01T09:30:00")
+            self.assertEqual(bank["closing_balance"], 800)
 
             transactions = [Transaction(**item) for item in ledger["transactions"]]
             evidence = [
@@ -146,33 +153,6 @@ class WorkbookServiceTest(unittest.TestCase):
             self.assertIn("증빙자료/receipt_2_영수증.png", archived_names)
             self.assertIn("원본자료/ledger_workbook_원본 장부.xlsx", archived_names)
 
-    def test_reconciliation_reports_amount_and_date_mismatch_candidates(self) -> None:
-        ledger = {
-            "transactions": [
-                {"transaction_id": "carry", "number": 1, "date": "2026-01-01", "description": "이월금", "income": 1_000, "expense": 0, "balance": 1_000},
-                {"transaction_id": "amount", "number": 2, "date": "2026-03-02", "description": "비품", "income": 0, "expense": 200, "balance": 800},
-                {"transaction_id": "date", "number": 3, "date": "2026-03-04", "description": "간식", "income": 0, "expense": 100, "balance": 700},
-            ]
-        }
-        bank = {
-            "transactions": [
-                {"bank_transaction_id": "bank-amount", "occurred_at": "2026-03-02T12:00:00", "date": "2026-03-02", "description": "비품", "amount": -250, "balance": 750, "memo": ""},
-                {"bank_transaction_id": "bank-date", "occurred_at": "2026-03-03T13:00:00", "date": "2026-03-03", "description": "간식", "amount": -100, "balance": 650, "memo": ""},
-            ],
-            "continuity_failures": [],
-        }
-
-        result = reconcile_ledger_bank(ledger, bank)
-
-        self.assertEqual(result["status"], "ERROR")
-        self.assertEqual(result["ledger_transaction_count"], 2)
-        self.assertEqual(result["unmatched_ledger_count"], 2)
-        self.assertEqual(result["unmatched_bank_count"], 2)
-        self.assertEqual([item["reason"] for item in result["unmatched_ledger"]], ["AMOUNT_MISMATCH", "DATE_MISMATCH"])
-        self.assertEqual(result["unmatched_ledger"][0]["candidate"]["amount"], -250)
-        self.assertEqual(result["unmatched_ledger"][1]["candidate"]["occurred_at"], "2026-03-03T13:00:00")
-
-
 class WorkbookApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -199,7 +179,7 @@ class WorkbookApiTest(unittest.TestCase):
 
     def test_upload_import_and_attach_evidence_snapshot(self) -> None:
         ledger_path = self.root / "Aegis-ledger.xlsx"
-        bank_path = self.root / "toss.xlsx"
+        bank_path = self.root / "woori.xlsx"
         receipt_path = self.root / "2_receipt.png"
         make_ledger(ledger_path)
         make_bank(bank_path)
@@ -222,7 +202,7 @@ class WorkbookApiTest(unittest.TestCase):
         self.assertEqual(ledger_upload.json()["detected_type"], "aegis_ledger")
         self.assertEqual(ledger_upload.json()["filename"], "Aegis 회계장부.xlsx")
         self.assertTrue(unicodedata.is_normalized("NFC", ledger_upload.json()["filename"]))
-        self.assertEqual(bank_upload.json()["detected_type"], "toss_bank")
+        self.assertEqual(bank_upload.json()["detected_type"], "woori_bank")
 
         imported = self.client.post(
             "/imports/workbook-snapshot",
@@ -235,7 +215,7 @@ class WorkbookApiTest(unittest.TestCase):
         )
         self.assertEqual(imported.status_code, 200)
         self.assertEqual(imported.json()["transaction_count"], 2)
-        self.assertEqual(imported.json()["reconciliation"]["status"], "PASS")
+        self.assertEqual(imported.json()["bank"]["kind"], "woori_bank")
 
         with receipt_path.open("rb") as stream:
             evidence = self.client.post(
@@ -277,7 +257,7 @@ class WorkbookApiTest(unittest.TestCase):
                 ],
             },
         ).json()
-        bank_path = self.root / "toss-bank-only.xlsx"
+        bank_path = self.root / "woori-bank-only.xlsx"
         make_bank(bank_path)
         with bank_path.open("rb") as stream:
             upload = self.client.post(
@@ -294,50 +274,39 @@ class WorkbookApiTest(unittest.TestCase):
 
         self.assertEqual(attached.status_code, 200)
         result = attached.json()
-        self.assertEqual(result["source"]["reconciliation"]["status"], "PASS")
-        self.assertEqual(len(result["source"]["bank_transactions"]), 1)
+        self.assertEqual(len(result["source"]["bank_transactions"]), 2)
+        self.assertEqual(result["source"]["bank_summary"]["kind"], "woori_bank")
         self.assertEqual(result["source"]["source_files"][0]["kind"], "bank_workbook")
 
-        verified = self.client.get(
-            f"/ledger-snapshots/{result['id']}/reconciliation",
-            headers=self.headers,
-        )
-        self.assertEqual(verified.status_code, 200)
-        self.assertEqual(verified.json()["status"], "PASS")
-
-        stale_source = {
-            **main.store.get("ledger_snapshots", result["id"])["source"],
-            "reconciliation": {
-                "status": "ERROR",
-                "unmatched_bank": [{"date": "2026-03-02", "amount": -200}],
-            },
-        }
-        main.store.update("ledger_snapshots", result["id"], {"source": stale_source})
-        refreshed = self.client.get(f"/ledger-snapshots/{result['id']}", headers=self.headers)
-        self.assertEqual(refreshed.status_code, 200)
-        self.assertEqual(refreshed.json()["source"]["reconciliation"]["status"], "PASS")
-        self.assertEqual(refreshed.json()["source"]["reconciliation"]["unmatched_bank"], [])
-
-    def test_reconciliation_endpoint_requires_bank_transactions(self) -> None:
+    def test_woori_file_cannot_attach_to_dues_account(self) -> None:
         snapshot = self.client.post(
             "/ledger-snapshots",
             headers=self.headers,
             json={
-                "account_id": "primary",
+                "account_id": "dues_intake",
                 "period": "2026년 1학기",
                 "transactions": [
-                    {"number": 1, "date": "2026-03-01", "description": "이월금", "income": 1_000, "expense": 0, "balance": 1_000},
+                    {"number": 1, "date": "2026-03-01", "description": "회비", "income": 1_000, "expense": 0, "balance": 1_000},
                 ],
             },
         ).json()
+        bank_path = self.root / "woori-wrong-account.xlsx"
+        make_bank(bank_path)
+        with bank_path.open("rb") as stream:
+            upload = self.client.post(
+                "/imports/upload",
+                headers=self.headers,
+                files={"file": (bank_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            ).json()
 
-        response = self.client.get(
-            f"/ledger-snapshots/{snapshot['id']}/reconciliation",
+        attached = self.client.post(
+            f"/ledger-snapshots/{snapshot['id']}/bank-transactions",
             headers=self.headers,
+            json={"upload_id": upload["id"]},
         )
 
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("계좌 거래내역", response.json()["detail"])
+        self.assertEqual(attached.status_code, 422)
+        self.assertIn("IBK 거래내역 PDF만", attached.json()["detail"])
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ def _won(value: int) -> str:
 
 def _account_label(account_id: str | None) -> str:
     labels = {
-        "primary": "동아리운영계좌(토스뱅크)",
+        "primary": "동아리운영계좌(우리은행)",
         "dues_intake": "회비입금계좌(IBK기업은행)",
     }
     return labels.get(account_id or "primary", account_id or "primary")
@@ -209,7 +209,7 @@ def generate_combined_ledger_workbook(
     wb = load_workbook(output_path)
     primary_sheet = wb.active
     dues_sheet = wb.copy_worksheet(primary_sheet)
-    primary_sheet.title = "동아리운영계좌(토스뱅크)"
+    primary_sheet.title = "동아리운영계좌(우리은행)"
     dues_sheet.title = "회비입금계좌(IBK기업은행)"
     sheets = {"primary": primary_sheet, "dues_intake": dues_sheet}
     sheet_labels = {"primary": _account_label("primary"), "dues_intake": _account_label("dues_intake")}
@@ -590,27 +590,13 @@ def generate_account_capture_document(
     }
 
 
-def generate_validation_report(output_path: Path, validation: dict, reconciliation: dict | None = None) -> None:
+def generate_validation_report(output_path: Path, validation: dict) -> None:
     summary = validation["summary"]
     rows = "\n".join(
         f"<li><strong>{html.escape(issue['severity'])}</strong> "
         f"{html.escape(issue['code'])}: {html.escape(issue['message'])}</li>"
         for issue in validation["issues"]
     )
-    reconciliation_html = ""
-    if reconciliation:
-        reconciliation_html = f"""
-  <h2>은행 거래내역 대사</h2>
-  <table>
-    <tr><th>상태</th><td>{html.escape(str(reconciliation.get('status')))}</td></tr>
-    <tr><th>대사 기준일</th><td>{html.escape(str(reconciliation.get('cutoff_date')))}</td></tr>
-    <tr><th>장부 마감잔액</th><td>{int(reconciliation.get('ledger_closing_balance') or 0):,}원</td></tr>
-    <tr><th>은행 마감잔액</th><td>{int(reconciliation.get('bank_closing_balance') or 0):,}원</td></tr>
-    <tr><th>잔액 차이</th><td>{int(reconciliation.get('balance_delta') or 0):,}원</td></tr>
-    <tr><th>자동 매칭</th><td>장부 {int(reconciliation.get('matched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('matched_bank_count') or 0):,}건</td></tr>
-    <tr><th>수동 확인 필요</th><td>장부 {int(reconciliation.get('unmatched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('unmatched_bank_count') or 0):,}건</td></tr>
-  </table>
-"""
     output_path.write_text(
         f"""<!doctype html>
 <html lang="ko">
@@ -638,7 +624,6 @@ def generate_validation_report(output_path: Path, validation: dict, reconciliati
   </table>
   <h2>검증 항목</h2>
   <ul>{rows or '<li>검증 이슈가 없습니다.</li>'}</ul>
-  {reconciliation_html}
 </body>
 </html>
 """,
@@ -665,7 +650,6 @@ def build_submission_package(
     period_start: str | None = None,
     period_end: str | None = None,
     bank_transactions: list[dict] | None = None,
-    reconciliation: dict | None = None,
     source_files: list[dict] | None = None,
 ) -> dict:
     package_dir = output_root / package_id
@@ -677,7 +661,6 @@ def build_submission_package(
         expected_closing_balance,
         period_start,
         period_end,
-        reconciliation,
     )
 
     ledger_path = package_dir / "수입지출관리대장.xlsx"
@@ -713,7 +696,7 @@ def build_submission_package(
         evidence,
         bank_transactions,
     )
-    generate_validation_report(report_path, validation, reconciliation)
+    generate_validation_report(report_path, validation)
 
     copied_evidence: list[dict] = []
     evidence_dir = package_dir / "증빙자료"
@@ -801,7 +784,6 @@ def build_submission_package(
         "template_version": TEMPLATE_VERSION,
         "document_coverage": document_coverage,
         "validation": validation,
-        "reconciliation": reconciliation,
         "evidence": copied_evidence,
         "source_files": copied_sources,
         "files": file_entries,
@@ -846,7 +828,6 @@ def _combined_validation(accounts: dict[str, dict]) -> dict:
             bundle.get("expected_closing_balance"),
             bundle.get("period_start"),
             bundle.get("period_end"),
-            bundle.get("reconciliation"),
         )
         account_results[account_id] = result
         for issue in result["issues"]:
@@ -885,15 +866,6 @@ def generate_combined_validation_report(output_path: Path, validation: dict, acc
             f"{html.escape(issue['code'])}: {html.escape(issue['message'])}</li>"
             for issue in result["issues"]
         )
-        reconciliation = accounts[account_id].get("reconciliation")
-        reconciliation_rows = ""
-        if reconciliation:
-            reconciliation_rows = f"""
-      <tr><th>은행 마감잔액</th><td>{int(reconciliation.get('bank_closing_balance') or 0):,}원</td></tr>
-      <tr><th>잔액 차이</th><td>{int(reconciliation.get('balance_delta') or 0):,}원</td></tr>
-      <tr><th>자동 매칭</th><td>장부 {int(reconciliation.get('matched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('matched_bank_count') or 0):,}건</td></tr>"""
-            reconciliation_rows += f"""
-      <tr><th>거래정보 불일치</th><td>장부 {int(reconciliation.get('unmatched_ledger_count') or 0):,}건 / 은행 {int(reconciliation.get('unmatched_bank_count') or 0):,}건</td></tr>"""
         sections.append(
             f"""
     <section>
@@ -906,7 +878,6 @@ def generate_combined_validation_report(output_path: Path, validation: dict, acc
         <tr><th>지출총액</th><td>{summary['total_expense']:,}원</td></tr>
         <tr><th>계산 최종잔액</th><td>{summary['computed_closing_balance']:,}원</td></tr>
         <tr><th>장부 최종잔액</th><td>{summary['reported_closing_balance']:,}원</td></tr>
-        {reconciliation_rows}
       </table>
       <h3>검증 항목</h3>
       <ul>{issue_rows or '<li>검증 이슈가 없습니다.</li>'}</ul>
@@ -951,7 +922,7 @@ def build_combined_submission_package(
 ) -> dict:
     required_accounts = {"primary", "dues_intake"}
     if set(accounts) != required_accounts:
-        raise ValueError("통합 동연 패키지에는 동아리운영계좌(토스뱅크)와 회비입금계좌(IBK기업은행) 장부가 모두 필요합니다.")
+        raise ValueError("통합 동연 패키지에는 동아리운영계좌(우리은행)와 회비입금계좌(IBK기업은행) 장부가 모두 필요합니다.")
 
     package_dir = output_root / package_id
     package_dir.mkdir(parents=True, exist_ok=True)
@@ -959,7 +930,7 @@ def build_combined_submission_package(
     ledger_path = package_dir / "동아리 수입지출관리대장.xlsx"
     account_path = package_dir / "동아리 계좌 전체내역.docx"
     evidence_paths = {
-        "primary": package_dir / "영수증 및 소명자료 - 동아리운영계좌(토스뱅크).docx",
+        "primary": package_dir / "영수증 및 소명자료 - 동아리운영계좌(우리은행).docx",
         "dues_intake": package_dir / "영수증 및 소명자료 - 회비입금계좌(IBK기업은행).docx",
     }
     report_path = package_dir / "검증_리포트.html"
@@ -1092,7 +1063,6 @@ def build_combined_submission_package(
                 "ledger_data_hash": bundle.get("ledger_data_hash"),
                 "transaction_count": len(bundle["transactions"]),
                 "evidence_count": len(bundle["evidence"]),
-                "reconciliation": bundle.get("reconciliation"),
             }
             for account_id, bundle in accounts.items()
         },

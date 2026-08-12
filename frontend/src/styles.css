@@ -159,28 +159,6 @@ td:nth-child(4), td:nth-child(9) { max-width: 260px; overflow: hidden; text-over
 .package-upload-compact strong { font-size: 13px; }
 .package-upload-compact small { color: #637772; font-size: 10px; }
 .package-upload-compact select { width: 180px; height: 36px; font-size: 11px; }
-.reconciliation-panel { margin-bottom: 12px; padding: 0; overflow: hidden; }
-.reconciliation-heading { min-height: 72px; margin: 0; padding: 14px 16px; align-items: center; }
-.reconciliation-heading .muted { margin: 5px 0 0; }
-.reconciliation-heading button { flex: 0 0 auto; }
-.reconciliation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
-.reconciliation-grid article { min-width: 0; padding: 15px 16px; }
-.reconciliation-grid article + article { border-left: 1px solid var(--line); }
-.reconciliation-account, .reconciliation-account > div { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.reconciliation-account > div { justify-content: flex-start; }
-.reconciliation-account strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.reconciliation-empty { min-height: 74px; margin: 16px 0 0; color: var(--muted); display: grid; place-items: center; text-align: center; font-size: 12px; }
-.reconciliation-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 14px 0 0; background: var(--line); }
-.reconciliation-metrics div { min-width: 0; padding: 9px; background: var(--surface-soft); }
-.reconciliation-metrics dt { color: var(--muted); font-size: 10px; }
-.reconciliation-metrics dd { margin: 4px 0 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 700; }
-.metric-error { color: var(--danger); }
-.mismatch-row { padding: 10px 2px; border-bottom: 1px solid #e5e8e9; display: grid; gap: 5px; }
-.mismatch-row > div { min-width: 0; display: grid; grid-template-columns: minmax(115px, auto) minmax(0, 1fr); gap: 10px; }
-.mismatch-row strong { color: var(--danger); font-size: 11px; }
-.mismatch-row span, .mismatch-row small { min-width: 0; color: #5f6b70; overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }
-.mismatch-row.bank-only strong { color: #76561c; }
-.reconciliation-more { margin: 9px 0 0; color: var(--muted); font-size: 10px; }
 .package-controls { grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); }
 .job-panel { min-height: 100%; }
 .validation-summary { display: flex; align-items: center; gap: 9px; color: #56656a; font-size: 12px; }
@@ -247,7 +225,7 @@ td:nth-child(4), td:nth-child(9) { max-width: 260px; overflow: hidden; text-over
   .tabs a { min-height: 46px; padding: 0 11px; }
   .section-head { min-height: 102px; padding-top: 20px; }
   .section-head h2 { font-size: 20px; }
-  .workspace-grid, .package-readiness, .snapshot-current-grid, .form-grid, .google-fields, .file-controls, .file-control, .evidence-control, .access-add-row, .reconciliation-grid { grid-template-columns: 1fr; }
+  .workspace-grid, .package-readiness, .snapshot-current-grid, .form-grid, .google-fields, .file-controls, .file-control, .evidence-control, .access-add-row { grid-template-columns: 1fr; }
   .period-strip { align-items: stretch; }
   .period-strip label { width: 100%; }
   .google-fields { gap: 10px; }
@@ -256,7 +234,6 @@ td:nth-child(4), td:nth-child(9) { max-width: 260px; overflow: hidden; text-over
   .package-readiness dl { grid-template-columns: repeat(3, minmax(88px, 1fr)); overflow-x: auto; }
   .package-upload-compact { align-items: stretch; flex-direction: column; }
   .package-upload-compact select { width: 100%; }
-  .reconciliation-grid article + article { border-top: 1px solid var(--line); border-left: 0; }
   .inline-select { width: 150px; min-width: 0; }
   .transaction-panel .panel-heading { align-items: flex-start; }
   .action-bar button { flex: 1 1 calc(50% - 8px); }
@@ -283,10 +260,6 @@ td:nth-child(4), td:nth-child(9) { max-width: 260px; overflow: hidden; text-over
   .snapshot-current-grid button + button { margin: 7px 0 0; }
   .section-head { flex-direction: column; gap: 10px; }
   .package-readiness dl { grid-template-columns: 1fr; }
-  .reconciliation-heading { align-items: stretch; flex-direction: column; }
-  .reconciliation-heading button { width: 100%; }
-  .reconciliation-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .mismatch-row > div { grid-template-columns: 1fr; gap: 3px; }
   .action-bar button { flex-basis: 100%; }
   .coverage { grid-template-columns: 1fr; }
   .link-output span { width: 100%; margin-left: 25px; }

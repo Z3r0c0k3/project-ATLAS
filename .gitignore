@@ -11,5 +11,6 @@ backend/storage/
 
 # Local banking exports can contain account and member information.
 sample/*.xlsx
+sample/*.xls
 sample/영수증/
 sample/소명자료/

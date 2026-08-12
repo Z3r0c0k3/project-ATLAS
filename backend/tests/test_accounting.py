@@ -64,22 +64,6 @@ class AccountingValidationTest(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertNotIn("MISSING_CARD_EVIDENCE", {issue["code"] for issue in result["issues"]})
 
-    def test_unmatched_ledger_and_bank_transactions_are_errors(self) -> None:
-        transactions = [Transaction(1, "2026-03-02", "비품", 0, 30_000, 970_000)]
-        reconciliation = {
-            "balance_delta": 0,
-            "bank_continuity_failure_count": 0,
-            "unmatched_ledger_count": 1,
-            "unmatched_bank_count": 2,
-        }
-
-        result = validate_ledger(1_000_000, transactions, [], 970_000, reconciliation=reconciliation)
-        codes = {issue["code"] for issue in result["issues"]}
-
-        self.assertEqual(result["status"], "ERROR")
-        self.assertIn("BANK_LEDGER_TRANSACTION_MISMATCH", codes)
-        self.assertIn("UNRECORDED_BANK_TRANSACTION", codes)
-
     def test_evidence_with_same_number_from_other_account_does_not_match(self) -> None:
         transactions = [
             Transaction(
@@ -143,7 +127,7 @@ class PackageGenerationTest(unittest.TestCase):
             root = Path(tmp)
             primary_receipt = root / "#1# primary receipt.png"
             dues_receipt = root / "*1* dues receipt.png"
-            primary_history = root / "토스뱅크 거래내역.png"
+            primary_history = root / "우리은행 거래내역.png"
             dues_history = root / "기업은행 거래내역.png"
             for path in (primary_receipt, dues_receipt, primary_history, dues_history):
                 Image.new("RGB", (640, 420), "white").save(path)
@@ -192,14 +176,14 @@ class PackageGenerationTest(unittest.TestCase):
             )
             package_dir = root / "pkg-combined"
             workbook = load_workbook(package_dir / "동아리 수입지출관리대장.xlsx", data_only=False)
-            primary_document = Document(package_dir / "영수증 및 소명자료 - 동아리운영계좌(토스뱅크).docx")
+            primary_document = Document(package_dir / "영수증 및 소명자료 - 동아리운영계좌(우리은행).docx")
             dues_document = Document(package_dir / "영수증 및 소명자료 - 회비입금계좌(IBK기업은행).docx")
             account_document = Document(package_dir / "동아리 계좌 전체내역.docx")
             with zipfile.ZipFile(result["zip_path"]) as archive:
                 names = set(archive.namelist())
 
-        self.assertEqual(workbook.sheetnames, ["동아리운영계좌(토스뱅크)", "회비입금계좌(IBK기업은행)"])
-        self.assertEqual(workbook["동아리운영계좌(토스뱅크)"]["G10"].value, "운영계좌 카드결제")
+        self.assertEqual(workbook.sheetnames, ["동아리운영계좌(우리은행)", "회비입금계좌(IBK기업은행)"])
+        self.assertEqual(workbook["동아리운영계좌(우리은행)"]["G10"].value, "운영계좌 카드결제")
         self.assertEqual(workbook["회비입금계좌(IBK기업은행)"]["G10"].value, "회비계좌 카드결제")
         self.assertIn("운영계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
         self.assertNotIn("회비계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
@@ -211,7 +195,7 @@ class PackageGenerationTest(unittest.TestCase):
         self.assertEqual(result["validation"]["status"], "PASS")
         self.assertIn("동아리 계좌 전체내역.docx", names)
         self.assertIn("동아리 수입지출관리대장.xlsx", names)
-        self.assertIn("영수증 및 소명자료 - 동아리운영계좌(토스뱅크).docx", names)
+        self.assertIn("영수증 및 소명자료 - 동아리운영계좌(우리은행).docx", names)
         self.assertIn("영수증 및 소명자료 - 회비입금계좌(IBK기업은행).docx", names)
 
     def test_submission_report_marks_missing_card_evidence_as_error(self) -> None:
