@@ -66,6 +66,7 @@ class ValidationIssue:
     message: str
     transaction_id: str | None = None
     transaction_number: int | None = None
+    transaction_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -313,11 +314,35 @@ def validate_ledger(
 
     for evidence_id, transaction_ids in links.items():
         if len(transaction_ids) > 1:
-            issues.append(ValidationIssue("DUPLICATE_EVIDENCE_LINK", "ERROR", "ERROR", f"증빙자료 {evidence_id}가 여러 거래에 중복 연결되었습니다."))
+            linked_numbers = tuple(
+                sorted(
+                    tx.number
+                    for tx in transactions
+                    if (tx.transaction_id or str(tx.number)) in transaction_ids
+                )
+            )
+            issues.append(
+                ValidationIssue(
+                    "DUPLICATE_EVIDENCE_LINK",
+                    "ERROR",
+                    "ERROR",
+                    f"증빙자료 {evidence_id}가 여러 거래에 중복 연결되었습니다.",
+                    transaction_numbers=linked_numbers,
+                )
+            )
 
     summary = summarize_ledger(opening_balance, transactions, evidence, expected_closing_balance)
     if summary.reported_closing_balance is not None and summary.computed_closing_balance != summary.reported_closing_balance:
-        issues.append(ValidationIssue("CLOSING_BALANCE_MISMATCH", "ERROR", "ERROR", "이전잔액 + 수입총액 - 지출총액이 최종잔액과 일치하지 않습니다."))
+        issues.append(
+            ValidationIssue(
+                "CLOSING_BALANCE_MISMATCH",
+                "ERROR",
+                "ERROR",
+                "이전잔액 + 수입총액 - 지출총액이 최종잔액과 일치하지 않습니다.",
+                transaction_id=transactions[-1].transaction_id if transactions else None,
+                transaction_number=transactions[-1].number if transactions else None,
+            )
+        )
     error_count = sum(1 for item in issues if item.severity == "ERROR")
     warning_count = sum(1 for item in issues if item.severity == "WARNING")
     status = "ERROR" if error_count else ("WARNING" if warning_count else "PASS")

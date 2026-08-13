@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import textwrap
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +15,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 from openpyxl import load_workbook
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 from .accounting import (
     VALIDATION_RULE_VERSION,
@@ -432,95 +431,11 @@ def generate_evidence_document(
     }
 
 
-def _document_font(size: int, bold: bool = False):
-    names = [
-        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf" if bold else "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-    ]
-    for name in names:
-        if Path(name).exists():
-            return ImageFont.truetype(name, size=size)
-    return ImageFont.load_default(size=size)
-
-
-def _render_bank_transaction_pages(rows: list[dict], output_dir: Path, account_id: str) -> list[Path]:
-    if not rows:
-        return []
-    output_dir.mkdir(parents=True, exist_ok=True)
-    width, height = 1100, 900
-    margin, header_height, footer_height = 40, 110, 35
-    columns = [margin, 230, 650, 800, 950, width - margin]
-    title_font = _document_font(30, bold=True)
-    header_font = _document_font(19, bold=True)
-    body_font = _document_font(18)
-
-    prepared: list[dict] = []
-    for row in rows:
-        detail = " / ".join(
-            str(value).strip()
-            for value in (
-                row.get("description"),
-                row.get("transfer_message"),
-                row.get("counterparty_name"),
-                row.get("memo"),
-                row.get("transaction_type"),
-            )
-            if str(value or "").strip()
-        )
-        detail_lines = textwrap.wrap(detail or "-", width=30, break_long_words=True, break_on_hyphens=False)
-        prepared.append({**row, "detail_lines": detail_lines, "row_height": max(54, len(detail_lines) * 24 + 14)})
-
-    pages: list[list[dict]] = []
-    current: list[dict] = []
-    used_height = header_height + 80
-    for row in prepared:
-        if current and used_height + row["row_height"] > height - footer_height:
-            pages.append(current)
-            current = []
-            used_height = header_height + 80
-        current.append(row)
-        used_height += row["row_height"]
-    if current:
-        pages.append(current)
-
-    rendered: list[Path] = []
-    for page_index, page_rows in enumerate(pages, start=1):
-        image = Image.new("RGB", (width, height), "white")
-        draw = ImageDraw.Draw(image)
-        draw.text((margin, 35), f"{_account_label(account_id)} 거래내역", fill="#172026", font=title_font)
-        draw.text((width - 150, 42), f"{page_index} / {len(pages)}", fill="#52646a", font=body_font)
-        top = header_height
-        labels = ("거래일시", "거래내용", "입출금액", "거래후잔액", "구분")
-        draw.rectangle((margin, top, width - margin, top + 58), fill="#e9f3df", outline="#829197", width=2)
-        for index, label in enumerate(labels):
-            draw.text((columns[index] + 10, top + 14), label, fill="#172026", font=header_font)
-            if index:
-                draw.line((columns[index], top, columns[index], top + 58), fill="#829197", width=2)
-        top += 58
-        for row in page_rows:
-            bottom = top + row["row_height"]
-            draw.rectangle((margin, top, width - margin, bottom), outline="#aab6ba", width=2)
-            for column in columns[1:-1]:
-                draw.line((column, top, column, bottom), fill="#aab6ba", width=2)
-            draw.text((columns[0] + 10, top + 12), str(row.get("occurred_at") or row.get("date") or "-"), fill="#172026", font=body_font)
-            draw.multiline_text((columns[1] + 10, top + 10), "\n".join(row["detail_lines"]), fill="#172026", font=body_font, spacing=3)
-            amount = int(row.get("amount") or 0)
-            draw.text((columns[2] + 10, top + 12), f"{amount:+,}", fill="#172026", font=body_font)
-            draw.text((columns[3] + 10, top + 12), f"{int(row.get('balance') or 0):,}", fill="#172026", font=body_font)
-            draw.text((columns[4] + 10, top + 12), str(row.get("transaction_type") or "-"), fill="#172026", font=body_font)
-            top = bottom
-        target = output_dir / f"{account_id}-{page_index:03d}.png"
-        image.crop((0, 0, width, min(height, top + footer_height))).save(target, "PNG", optimize=True)
-        rendered.append(target)
-    return rendered
-
-
 def generate_account_capture_document(
     output_path: Path,
     club_name: str,
     president_name: str,
     evidence: list[Evidence],
-    bank_transactions: list[dict] | None = None,
 ) -> dict:
     template_path = _official_template("account")
     doc = Document(template_path)
@@ -544,15 +459,6 @@ def generate_account_capture_document(
             entries.append({"evidence": item, "page": page})
             embedded_pages += 1
 
-    bank_rows = bank_transactions or []
-    bank_page_count = 0
-    for account_id in ("primary", "dues_intake"):
-        account_rows = [row for row in bank_rows if row.get("account_id", "primary") == account_id]
-        pages = _render_bank_transaction_pages(account_rows, render_dir / f"bank-{account_id}", account_id)
-        bank_page_count += len(pages)
-        for page in pages:
-            entries.append({"account_id": account_id, "page": page, "bank_page": True})
-
     required_tables = max(1, (len(entries) + 3) // 4)
     _append_account_template_pages(doc, required_tables)
     for paragraph in doc.paragraphs:
@@ -565,10 +471,8 @@ def generate_account_capture_document(
         table = doc.tables[index // 4]
         position = index % 4
         cell = table.cell(position // 2, position % 2)
-        item = entry.get("evidence")
-        account_id = item.account_id if item else entry.get("account_id", "primary")
-        suffix = " 거래내역 표" if entry.get("bank_page") else ""
-        label = f"<{index + 1}> {_account_label(account_id)}{suffix}"
+        item = entry["evidence"]
+        label = f"<{index + 1}> {_account_label(item.account_id)}"
         if entry.get("page"):
             _fill_image_cell(cell, entry["page"], label, max_width=3.0, max_height=3.55)
         else:
@@ -580,9 +484,7 @@ def generate_account_capture_document(
     return {
         "capture_file_count": len(captures),
         "embedded_capture_pages": embedded_pages,
-        "generated_bank_pages": bank_page_count,
-        "embedded_total_pages": embedded_pages + bank_page_count,
-        "bank_transaction_rows": len(bank_rows),
+        "embedded_total_pages": embedded_pages,
         "unsupported_files": sorted(set(unsupported_files)),
         "account_breakdown": list(account_breakdown.values()),
         "template_filename": _normalized(template_path.name),
@@ -590,13 +492,23 @@ def generate_account_capture_document(
     }
 
 
+def _validation_issue_html(issue: dict) -> str:
+    ledger_numbers = issue.get("transaction_numbers") or []
+    if issue.get("transaction_number") is not None:
+        ledger_numbers = [issue["transaction_number"]]
+    ledger_id = ""
+    if ledger_numbers:
+        label = ", ".join(str(int(number)) for number in ledger_numbers)
+        ledger_id = f'<span class="ledger-id">장부 ID: {html.escape(label)}</span> '
+    return (
+        f"<li><strong>{html.escape(issue['severity'])}</strong> {ledger_id}"
+        f"{html.escape(issue['code'])}: {html.escape(issue['message'])}</li>"
+    )
+
+
 def generate_validation_report(output_path: Path, validation: dict) -> None:
     summary = validation["summary"]
-    rows = "\n".join(
-        f"<li><strong>{html.escape(issue['severity'])}</strong> "
-        f"{html.escape(issue['code'])}: {html.escape(issue['message'])}</li>"
-        for issue in validation["issues"]
-    )
+    rows = "\n".join(_validation_issue_html(issue) for issue in validation["issues"])
     output_path.write_text(
         f"""<!doctype html>
 <html lang="ko">
@@ -610,6 +522,7 @@ def generate_validation_report(output_path: Path, validation: dict) -> None:
     th, td {{ border: 1px solid #c7d0d9; padding: 10px; text-align: left; }}
     th {{ background: #e9f3df; }}
     .status {{ font-weight: 700; }}
+    .ledger-id {{ display: inline-block; margin: 0 6px; padding: 2px 6px; background: #eef2f1; font-weight: 700; }}
   </style>
 </head>
 <body>
@@ -649,7 +562,6 @@ def build_submission_package(
     ledger_data_hash: str | None = None,
     period_start: str | None = None,
     period_end: str | None = None,
-    bank_transactions: list[dict] | None = None,
     source_files: list[dict] | None = None,
 ) -> dict:
     package_dir = output_root / package_id
@@ -694,7 +606,6 @@ def build_submission_package(
         club_name,
         president_name,
         evidence,
-        bank_transactions,
     )
     generate_validation_report(report_path, validation)
 
@@ -721,6 +632,8 @@ def build_submission_package(
     source_dir = package_dir / "원본자료"
     source_dir.mkdir(exist_ok=True)
     for item in source_files or []:
+        if item.get("kind") != "ledger_workbook":
+            continue
         source_path = Path(str(item.get("local_path") or ""))
         if not source_path.exists():
             continue
@@ -861,11 +774,7 @@ def generate_combined_validation_report(output_path: Path, validation: dict, acc
     for account_id in ("primary", "dues_intake"):
         result = validation["accounts"][account_id]
         summary = result["summary"]
-        issue_rows = "\n".join(
-            f"<li><strong>{html.escape(issue['severity'])}</strong> "
-            f"{html.escape(issue['code'])}: {html.escape(issue['message'])}</li>"
-            for issue in result["issues"]
-        )
+        issue_rows = "\n".join(_validation_issue_html(issue) for issue in result["issues"])
         sections.append(
             f"""
     <section>
@@ -895,6 +804,7 @@ def generate_combined_validation_report(output_path: Path, validation: dict, acc
     table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
     th, td {{ border: 1px solid #c7d0d9; padding: 10px; text-align: left; }}
     th {{ width: 220px; background: #e9f3df; }} .status {{ font-weight: 700; }}
+    .ledger-id {{ display: inline-block; margin: 0 6px; padding: 2px 6px; background: #eef2f1; font-weight: 700; }}
   </style>
 </head>
 <body>
@@ -959,31 +869,13 @@ def build_combined_submission_package(
     }
 
     combined_evidence: list[Evidence] = []
-    combined_bank_transactions: list[dict] = []
     for account_id, bundle in accounts.items():
         combined_evidence.extend(bundle["evidence"])
-        combined_bank_transactions.extend(
-            {**row, "account_id": account_id} for row in bundle.get("bank_transactions", [])
-        )
-        for index, source in enumerate(bundle.get("source_files", [])):
-            source_path = Path(str(source.get("local_path") or ""))
-            if source.get("kind") == "bank_workbook" and source_path.exists():
-                combined_evidence.append(
-                    Evidence(
-                        id=f"source-bank-{account_id}-{index}",
-                        transaction_number=None,
-                        filename=normalize_filename(str(source.get("filename") or source_path.name)),
-                        kind="account_capture",
-                        account_id=account_id,
-                        local_path=str(source_path),
-                    )
-                )
     account_coverage = generate_account_capture_document(
         account_path,
         club_name,
         president_name,
         combined_evidence,
-        combined_bank_transactions,
     )
     generate_combined_validation_report(report_path, validation, accounts)
 
@@ -1013,6 +905,8 @@ def build_combined_submission_package(
                 }
             )
         for source in bundle.get("source_files", []):
+            if source.get("kind") != "ledger_workbook":
+                continue
             source_path = Path(str(source.get("local_path") or ""))
             if not source_path.exists():
                 continue

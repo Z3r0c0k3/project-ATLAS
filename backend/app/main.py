@@ -16,7 +16,6 @@ from .models import (
     AcknowledgeIssuesRequest,
     AccessMemberRequest,
     AuthSession,
-    BankAttachRequest,
     DiscordMessageResponse,
     DiscordPreviewRequest,
     DiscordWebhookRequest,
@@ -67,10 +66,7 @@ from .services.security import SecretBox, mask_webhook_url, sanitize_secret_fiel
 from .services.store import JsonStore, utc_now
 from .services.workbooks import (
     WorkbookParseError,
-    is_ibk_bank_pdf,
     parse_aegis_ledger,
-    parse_ibk_bank_pdf,
-    parse_woori_bank,
     workbook_preview,
 )
 
@@ -79,6 +75,7 @@ DATA_ROOT = Path(__file__).resolve().parents[1] / "storage"
 UPLOAD_ROOT = DATA_ROOT / "uploads"
 OUTPUT_ROOT = DATA_ROOT / "outputs"
 MAX_UPLOAD_BYTES = int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+INSUFFICIENT_PERMISSION_MESSAGE = "현재 권한으로 해당 작업을 진행할 수 없습니다."
 PUBLIC_FRONTEND_BASE_URL = os.getenv("PUBLIC_FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
 ROOT_PATH = os.getenv("ROOT_PATH", "")
 ADMIN_EMAIL = os.getenv("ATLAS_ADMIN_EMAIL", "").strip().lower()
@@ -115,16 +112,6 @@ def normalize_email(value: str) -> str:
     return email
 
 
-def parse_bank_upload(path: Path, account_id: str) -> dict:
-    if account_id == "dues_intake":
-        if not is_ibk_bank_pdf(path):
-            raise WorkbookParseError("회비입금계좌(IBK기업은행)에는 IBK 거래내역 PDF만 연결할 수 있습니다.")
-        return parse_ibk_bank_pdf(path)
-    if path.suffix.lower() == ".pdf":
-        raise WorkbookParseError("동아리운영계좌(우리은행)에는 우리은행 .xls, .xlsx 또는 .xlsm 파일만 연결할 수 있습니다.")
-    return parse_woori_bank(path)
-
-
 def access_member(email: str) -> dict | None:
     email = email.strip().lower()
     if ADMIN_EMAIL and email == ADMIN_EMAIL:
@@ -151,10 +138,10 @@ def require_roles(*allowed_roles: Role):
             raise HTTPException(status_code=401, detail="Invalid ATLAS session token")
         member = access_member(session.get("email", "")) if session.get("email") else None
         if session.get("email") and not member:
-            raise HTTPException(status_code=403, detail="ATLAS access has been revoked")
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSION_MESSAGE)
         effective = {**session, "role": member["role"]} if member else session
         if effective["role"] not in {role.value for role in allowed_roles}:
-            raise HTTPException(status_code=403, detail="Role is not allowed for this operation")
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSION_MESSAGE)
         return effective
 
     return dependency
@@ -640,7 +627,7 @@ def google_login(payload: GoogleLoginRequest, request: Request) -> AuthSession:
     store.update("oauth_states", oauth_state["id"], {"consumed_at": utc_now()})
     member = access_member(email)
     if not member:
-        raise HTTPException(status_code=403, detail="이 Google 계정은 ATLAS 사용 권한이 없습니다.")
+        raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSION_MESSAGE)
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)).isoformat()
     session = store.insert(
         "sessions",
@@ -895,18 +882,14 @@ def upload_import(
 ) -> dict:
     UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     target, size = persist_upload(file)
-    analysis = None
-    parse_error = None
-    if target.suffix.lower() in {".xls", ".xlsx", ".xlsm"}:
-        try:
-            analysis = workbook_preview(target)
-        except WorkbookParseError as exc:
-            parse_error = str(exc)
-    elif target.suffix.lower() == ".pdf" and is_ibk_bank_pdf(target):
-        try:
-            analysis = workbook_preview(target)
-        except WorkbookParseError as exc:
-            parse_error = str(exc)
+    if target.suffix.lower() not in {".xls", ".xlsx", ".xlsm"}:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="Aegis 회계장부 Excel 파일만 가져올 수 있습니다.")
+    try:
+        analysis = workbook_preview(target)
+    except WorkbookParseError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     row = store.insert(
         "uploads",
         {
@@ -915,9 +898,9 @@ def upload_import(
             "size": size,
             "sha256": file_sha256(target),
             "path": str(target),
-            "detected_type": analysis.get("kind") if analysis else None,
+            "detected_type": analysis["kind"],
             "analysis": analysis,
-            "parse_error": parse_error,
+            "parse_error": None,
         },
         "upl",
     )
@@ -1037,17 +1020,6 @@ def create_workbook_snapshot(
     for transaction in ledger["transactions"]:
         transaction["evidence_ids"] = evidence_by_number.get(transaction["number"], [])
 
-    bank = None
-    bank_upload = None
-    if payload.bank_upload_id:
-        bank_upload = store.get("uploads", payload.bank_upload_id)
-        if not bank_upload:
-            raise HTTPException(status_code=404, detail="Bank upload not found")
-        try:
-            bank = parse_bank_upload(Path(bank_upload["path"]), payload.account_id)
-        except WorkbookParseError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
     source_files = [
         {
             "kind": "ledger_workbook",
@@ -1056,15 +1028,6 @@ def create_workbook_snapshot(
             "sha256": ledger_upload["sha256"],
         }
     ]
-    if bank_upload:
-        source_files.append(
-            {
-                "kind": "bank_workbook",
-                "filename": normalize_filename(bank_upload["filename"]),
-                "local_path": bank_upload["path"],
-                "sha256": bank_upload["sha256"],
-            }
-        )
     snapshot = create_snapshot(
         LedgerSnapshotRequest(
             organization_id=payload.organization_id,
@@ -1082,8 +1045,6 @@ def create_workbook_snapshot(
         {
             "source_files": source_files,
             "ledger_summary": {key: value for key, value in ledger.items() if key != "transactions"},
-            "bank_summary": {key: value for key, value in (bank or {}).items() if key != "transactions"} or None,
-            "bank_transactions": (bank or {}).get("transactions", []),
         },
     )
     audit(
@@ -1091,7 +1052,7 @@ def create_workbook_snapshot(
         "workbook.imported",
         "ledger_snapshot",
         snapshot["id"],
-        after={"ledger_upload_id": ledger_upload["id"], "bank_upload_id": payload.bank_upload_id},
+        after={"ledger_upload_id": ledger_upload["id"]},
         request=request,
     )
     return {
@@ -1099,7 +1060,6 @@ def create_workbook_snapshot(
         "transactions": snapshot["transactions"],
         "evidence": snapshot["evidence"],
         "ledger": {key: value for key, value in ledger.items() if key != "transactions"},
-        "bank": {key: value for key, value in (bank or {}).items() if key != "transactions"} or None,
     }
 
 
@@ -1299,63 +1259,6 @@ def attach_snapshot_evidence(
     return public_snapshot_record(created)
 
 
-@app.post("/ledger-snapshots/{snapshot_id}/bank-transactions")
-def attach_snapshot_bank_transactions(
-    snapshot_id: str,
-    payload: BankAttachRequest,
-    request: Request,
-    session: dict = Depends(require_roles(Role.admin, Role.accountant)),
-) -> dict:
-    current = store.get("ledger_snapshots", snapshot_id)
-    upload = store.get("uploads", payload.upload_id)
-    if not current:
-        raise HTTPException(status_code=404, detail="Ledger snapshot not found")
-    if not upload:
-        raise HTTPException(status_code=404, detail="Bank upload not found")
-    if not current.get("transactions"):
-        raise HTTPException(status_code=422, detail="은행 거래내역을 연결할 장부 거래가 없습니다.")
-    bank_path = Path(upload["path"])
-    try:
-        bank = parse_bank_upload(bank_path, current["account_id"])
-    except WorkbookParseError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    source_files = [
-        item
-        for item in (current.get("source") or {}).get("source_files", [])
-        if item.get("kind") != "bank_workbook"
-    ]
-    source_files.append(
-        {
-            "kind": "bank_workbook",
-            "filename": normalize_filename(upload["filename"]),
-            "local_path": upload["path"],
-            "sha256": upload["sha256"],
-        }
-    )
-    created = create_snapshot_revision(
-        current,
-        [dict(item) for item in current["transactions"]],
-        [dict(item) for item in current.get("evidence", [])],
-        session,
-        {"action": "bank_transactions.attached", "upload_id": upload["id"]},
-        {
-            "source_files": source_files,
-            "bank_summary": {key: value for key, value in bank.items() if key != "transactions"},
-            "bank_transactions": bank.get("transactions", []),
-        },
-    )
-    audit(
-        session,
-        "ledger_snapshot.bank_transactions_attached",
-        "ledger_snapshot",
-        created["id"],
-        before={"parent_snapshot_id": snapshot_id},
-        after={"upload_id": upload["id"]},
-        request=request,
-    )
-    return public_snapshot_record(created)
-
-
 @app.post(
     "/packages/submission",
     response_model=PackageJobResponse,
@@ -1426,7 +1329,6 @@ def create_submission_package(
                     "period_end": (latest_snapshots["primary"].get("source") or {}).get("period_end"),
                     "transactions": normalize_transactions(latest_snapshots["primary"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["primary"]["evidence"]),
-                    "bank_transactions": (latest_snapshots["primary"].get("source") or {}).get("bank_transactions", []),
                     "source_files": (latest_snapshots["primary"].get("source") or {}).get("source_files", []),
                 },
                 "dues_intake": {
@@ -1438,7 +1340,6 @@ def create_submission_package(
                     "period_end": (latest_snapshots["dues_intake"].get("source") or {}).get("period_end"),
                     "transactions": normalize_transactions(latest_snapshots["dues_intake"]["transactions"]),
                     "evidence": normalize_evidence(latest_snapshots["dues_intake"]["evidence"]),
-                    "bank_transactions": (latest_snapshots["dues_intake"].get("source") or {}).get("bank_transactions", []),
                     "source_files": (latest_snapshots["dues_intake"].get("source") or {}).get("source_files", []),
                 },
             }
@@ -1474,7 +1375,6 @@ def create_submission_package(
                 latest_snapshot["data_hash"],
                 payload_data.get("period_start"),
                 payload_data.get("period_end"),
-                latest_snapshot.get("source", {}).get("bank_transactions", []),
                 latest_snapshot.get("source", {}).get("source_files", []),
             )
         updated = store.update(

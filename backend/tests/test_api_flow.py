@@ -239,6 +239,18 @@ class ApiWorkflowTest(unittest.TestCase):
             self.client.delete(f"/settings/access-members/{added.json()['id']}", headers=owner_headers)
             self.assertEqual(self.client.get("/auth/me", headers=reviewer_headers).status_code, 403)
 
+    def test_role_denial_uses_user_facing_message(self) -> None:
+        reviewer = main.store.insert("sessions", {"username": "reviewer", "role": "reviewer"}, "sess")
+
+        response = self.client.post(
+            "/ledger-snapshots",
+            headers={"X-ATLAS-Token": reviewer["id"]},
+            json={"period": "2026년 1학기", "transactions": []},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "현재 권한으로 해당 작업을 진행할 수 없습니다.")
+
     def test_google_api_refreshes_an_expired_access_token(self) -> None:
         connection = main.store.insert(
             "google_connections",

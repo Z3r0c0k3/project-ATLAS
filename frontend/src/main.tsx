@@ -74,6 +74,7 @@ const ROLE_LABELS: Record<Role, string> = {
   accountant: "총무",
   reviewer: "검토자",
 };
+const can = (role: Role, ...allowed: Role[]) => allowed.includes(role);
 
 function routeFromPath(): RouteId {
   const segment = window.location.pathname.split("/").filter(Boolean)[0];
@@ -88,16 +89,12 @@ function previousMonthValue(): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function previousMonthLabel(): string {
-  const [year, month] = previousMonthValue().split("-");
-  return `${year}년 ${Number(month)}월`;
-}
-
 function money(value: number): string {
   return `${Number(value || 0).toLocaleString("ko-KR")}원`;
 }
 
 async function parseApiError(response: Response): Promise<Error> {
+  if (response.status === 403) return new Error("현재 권한으로 해당 작업을 진행할 수 없습니다.");
   const raw = await response.text();
   if ((response.headers.get("content-type") || "").includes("text/html") || raw.trimStart().startsWith("<!DOCTYPE html")) {
     return new Error(`서버 연결에 실패했습니다 (${response.status}).`);
@@ -274,33 +271,34 @@ function useWorkspace(token: string, run: Runner) {
   };
 }
 
-function GooglePanel({ workspace, fixedStart = false }: { workspace: ReturnType<typeof useWorkspace>; fixedStart?: boolean }) {
+function GooglePanel({ workspace, editable, fixedStart = false }: { workspace: ReturnType<typeof useWorkspace>; editable: boolean; fixedStart?: boolean }) {
   const connected = Boolean(workspace.googleConnection?.connected);
   return (
     <section className="panel google-panel">
       <div className="panel-heading"><div><p className="eyebrow">GOOGLE SHEETS</p><h3>Google 자료 연결</h3></div><StatusBadge value={connected ? "CONNECTED" : "DISCONNECTED"} /></div>
       <p className="muted">{connected ? workspace.googleConnection.account_email : "Aegis Google 계정을 연결해주세요."}</p>
       <div className="google-fields">
-        <label>{ACCOUNT_LABELS.primary}<input value={workspace.primarySource} onChange={(event) => workspace.setPrimarySource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label>
-        <label>{ACCOUNT_LABELS.dues_intake}<input value={workspace.duesSource} onChange={(event) => workspace.setDuesSource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label>
-        <label>범위<input value={workspace.range} onChange={(event) => workspace.setRange(event.target.value)} placeholder="B:I" /></label>
+        <label>{ACCOUNT_LABELS.primary}<input disabled={!editable} value={workspace.primarySource} onChange={(event) => workspace.setPrimarySource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label>
+        <label>{ACCOUNT_LABELS.dues_intake}<input disabled={!editable} value={workspace.duesSource} onChange={(event) => workspace.setDuesSource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label>
+        <label>범위<input disabled={!editable} value={workspace.range} onChange={(event) => workspace.setRange(event.target.value)} placeholder="B:I" /></label>
       </div>
       <div className="button-row">
-        {connected ? <button className="secondary danger" onClick={workspace.disconnectGoogle}><LogOut size={16} /> 연결 해제</button> : <button onClick={workspace.connectGoogle}><Link2 size={16} /> 계정 연결</button>}
-        <button className="secondary" disabled={!connected} onClick={() => workspace.importGoogle("primary", fixedStart ? PERIOD_START : PERIOD_START, PERIOD_END)}><FileSpreadsheet size={16} /> 운영 장부 연결</button>
-        <button className="secondary" disabled={!connected} onClick={() => workspace.importGoogle("dues_intake", fixedStart ? PERIOD_START : PERIOD_START, PERIOD_END)}><FileSpreadsheet size={16} /> 회비 장부 연결</button>
+        {connected ? <button className="secondary danger" disabled={!editable} onClick={workspace.disconnectGoogle}><LogOut size={16} /> 연결 해제</button> : <button disabled={!editable} onClick={workspace.connectGoogle}><Link2 size={16} /> 계정 연결</button>}
+        <button className="secondary" disabled={!editable || !connected} onClick={() => workspace.importGoogle("primary", fixedStart ? PERIOD_START : PERIOD_START, PERIOD_END)}><FileSpreadsheet size={16} /> 운영 장부 연결</button>
+        <button className="secondary" disabled={!editable || !connected} onClick={() => workspace.importGoogle("dues_intake", fixedStart ? PERIOD_START : PERIOD_START, PERIOD_END)}><FileSpreadsheet size={16} /> 회비 장부 연결</button>
       </div>
     </section>
   );
 }
 
-function LedgerPage({ token, run }: { token: string; run: Runner }) {
+function LedgerPage({ token, run, role }: { token: string; run: Runner; role: Role }) {
   const workspace = useWorkspace(token, run);
+  const editable = can(role, "admin", "accountant");
   const [periodStart, setPeriodStart] = useState(PERIOD_START);
   const [periodEnd, setPeriodEnd] = useState(PERIOD_END);
   const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
-  const [uploadAccount, setUploadAccount] = useState<AccountId>("primary");
   const [evidenceAccount, setEvidenceAccount] = useState<AccountId | "auto">("auto");
+  const [evidenceKind, setEvidenceKind] = useState("auto");
   const [evidenceNumber, setEvidenceNumber] = useState("");
   const [previewFiles, setPreviewFiles] = useState<EvidencePreview[] | null>(null);
   const rows = useMemo(() => [...(workspace.primarySnapshot?.transactions || []), ...(workspace.duesSnapshot?.transactions || [])], [workspace.primarySnapshot, workspace.duesSnapshot]);
@@ -316,27 +314,13 @@ function LedgerPage({ token, run }: { token: string; run: Runner }) {
     await workspace.importGoogle(accountId, periodStart, periodEnd);
   }
 
-  async function uploadBank(file: File) {
-    const snapshot = uploadAccount === "primary" ? workspace.primarySnapshot : workspace.duesSnapshot;
-    if (!snapshot?.id) {
-      await run("계좌 거래내역 연결", async () => { throw new Error(`${ACCOUNT_LABELS[uploadAccount]} 장부를 먼저 연결해주세요.`); });
-      return;
-    }
-    const form = new FormData();
-    form.append("file", file);
-    const upload = await run("계좌 거래내역 업로드", () => api<any>("/imports/upload", token, { method: "POST", body: form }));
-    if (!upload) return;
-    const revision = await run("계좌 거래내역 연결", () => api<any>(`/ledger-snapshots/${snapshot.id}/bank-transactions`, token, { method: "POST", body: JSON.stringify({ upload_id: upload.id }) }));
-    if (revision) workspace.applySnapshot(revision);
-  }
-
   async function uploadEvidence(files: FileList) {
     const uploaded = await run("영수증·소명·캡처 업로드", async () => {
       const results = [];
       for (const file of Array.from(files)) {
         const form = new FormData();
         form.append("file", file);
-        form.append("kind", "auto");
+        form.append("kind", evidenceKind);
         if (evidenceAccount !== "auto") form.append("account_id", evidenceAccount);
         if (evidenceNumber) form.append("transaction_number", evidenceNumber);
         results.push(await api<any>("/evidence/upload", token, { method: "POST", body: form }));
@@ -362,23 +346,20 @@ function LedgerPage({ token, run }: { token: string; run: Runner }) {
   }
 
   return <>
-    <PageHeading eyebrow="LEDGER & EVIDENCE" title="장부/증빙" description="원본 장부를 연결하고 계좌 거래내역과 증빙을 매칭합니다." />
+    <PageHeading eyebrow="LEDGER & EVIDENCE" title="장부/증빙" description="원본 장부를 연결하고 영수증·소명·계좌 캡처를 매칭합니다." />
     <section className="period-strip">
-      <label>시작일<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
-      <label>종료일<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
+      <label>시작일<input disabled={!editable} type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} /></label>
+      <label>종료일<input disabled={!editable} type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} /></label>
     </section>
-    <GooglePanel workspace={{ ...workspace, importGoogle: (accountId) => workspace.importGoogle(accountId, periodStart, periodEnd) }} />
+    <GooglePanel editable={editable} workspace={{ ...workspace, importGoogle: (accountId) => workspace.importGoogle(accountId, periodStart, periodEnd) }} />
     <section className="panel compact-import">
-      <div className="panel-heading"><div><p className="eyebrow">FILES</p><h3>실제 파일 가져오기</h3></div></div>
+      <div className="panel-heading"><div><p className="eyebrow">EVIDENCE</p><h3>영수증·소명·계좌 캡처</h3></div></div>
       <div className="file-controls">
-        <div className="file-control">
-          <label>계좌<select value={uploadAccount} onChange={(event) => setUploadAccount(event.target.value as AccountId)}><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></label>
-          <label className="file-button"><Upload size={16} /> 계좌 거래내역<input type="file" accept=".xls,.xlsx,.xlsm,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadBank(file).catch(() => undefined); event.currentTarget.value = ""; }} /></label>
-        </div>
         <div className="file-control evidence-control">
-          <label>계좌 분류<select value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></label>
-          <label>장부 ID<input type="number" min="1" value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="파일명에 없을 때" /></label>
-          <label className="file-button"><ReceiptText size={16} /> 영수증·소명·캡처<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
+          <label>자료 종류<select disabled={!editable} value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value)}><option value="auto">파일명 자동 판별</option><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 전체내역 캡처</option></select></label>
+          <label>계좌 분류<select disabled={!editable} value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></label>
+          <label>장부 ID<input disabled={!editable} type="number" min="1" value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="파일명에 없을 때" /></label>
+          <label className={`file-button${editable ? "" : " disabled"}`}><ReceiptText size={16} /> 영수증·소명·캡처<input disabled={!editable} type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
         </div>
       </div>
     </section>
@@ -390,20 +371,24 @@ function LedgerPage({ token, run }: { token: string; run: Runner }) {
   </>;
 }
 
-function PackagePage({ token, run }: { token: string; run: Runner }) {
+function PackagePage({ token, run, role }: { token: string; run: Runner; role: Role }) {
   const workspace = useWorkspace(token, run);
+  const canEditLedger = can(role, "admin", "accountant");
+  const canCreate = can(role, "admin", "accountant", "president");
+  const canApprove = can(role, "admin", "president", "reviewer");
   const [clubName, setClubName] = useState("Aegis");
   const [semester, setSemester] = useState(`${CURRENT_YEAR}년 1학기`);
   const [treasurerName, setTreasurerName] = useState("회계담당자");
   const [presidentName, setPresidentName] = useState("회장");
   const [reviewerName, setReviewerName] = useState("검토자");
   const [evidenceAccount, setEvidenceAccount] = useState<AccountId | "auto">("auto");
+  const [evidenceKind, setEvidenceKind] = useState("auto");
   const [job, setJob] = useState<any>(null);
   const [packageData, setPackageData] = useState<any>(null);
   const primary = workspace.primarySnapshot;
   const dues = workspace.duesSnapshot;
-  const primaryHistory = (primary?.evidence || []).filter((item: any) => item.kind === "account_capture").length || Number(Boolean(primary?.source?.bank_transactions?.length));
-  const duesHistory = (dues?.evidence || []).filter((item: any) => item.kind === "account_capture").length || Number(Boolean(dues?.source?.bank_transactions?.length));
+  const primaryHistory = (primary?.evidence || []).filter((item: any) => item.kind === "account_capture").length;
+  const duesHistory = (dues?.evidence || []).filter((item: any) => item.kind === "account_capture").length;
   const ready = Boolean(primary?.id && dues?.id && primaryHistory && duesHistory);
 
   async function uploadEvidence(files: FileList) {
@@ -412,7 +397,7 @@ function PackagePage({ token, run }: { token: string; run: Runner }) {
       for (const file of Array.from(files)) {
         const form = new FormData();
         form.append("file", file);
-        form.append("kind", "auto");
+        form.append("kind", evidenceKind);
         if (evidenceAccount !== "auto") form.append("account_id", evidenceAccount);
         results.push(await api<any>("/evidence/upload", token, { method: "POST", body: form }));
       }
@@ -441,7 +426,7 @@ function PackagePage({ token, run }: { token: string; run: Runner }) {
   }
 
   async function createPackage() {
-    if (!ready) throw new Error("두 계좌 장부와 계좌 전체내역을 모두 준비해주세요.");
+    if (!ready) throw new Error("두 계좌 장부와 계좌 전체내역 캡처를 모두 준비해주세요.");
     const result = await run("동연 패키지 생성", async () => {
       const created = await api<any>("/packages/submission", token, {
         method: "POST",
@@ -487,20 +472,21 @@ function PackagePage({ token, run }: { token: string; run: Runner }) {
       <AccountReadiness accountId="primary" snapshot={primary} historyCount={primaryHistory} />
       <AccountReadiness accountId="dues_intake" snapshot={dues} historyCount={duesHistory} />
     </section>
-    <GooglePanel workspace={workspace} fixedStart />
+    <GooglePanel editable={canEditLedger} workspace={workspace} fixedStart />
     <section className="package-upload-compact">
-      <div><ReceiptText size={18} /><span><strong>영수증·소명·계좌 전체내역</strong><small>#장부ID# 운영계좌 · *장부ID* 회비계좌</small></span></div>
-      <select aria-label="업로드 계좌 분류" value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">운영계좌</option><option value="dues_intake">회비계좌</option></select>
-      <label className="file-button"><Upload size={16} /> 일괄 등록<input type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
+      <div><ReceiptText size={18} /><span><strong>영수증·소명·계좌 전체내역 캡처</strong><small>#장부ID# 운영계좌 · *장부ID* 회비계좌</small></span></div>
+      <select disabled={!canEditLedger} aria-label="업로드 자료 종류" value={evidenceKind} onChange={(event) => setEvidenceKind(event.target.value)}><option value="auto">자료 자동 판별</option><option value="receipt">영수증</option><option value="explanation">소명자료</option><option value="account_capture">계좌 전체내역 캡처</option></select>
+      <select disabled={!canEditLedger} aria-label="업로드 계좌 분류" value={evidenceAccount} onChange={(event) => setEvidenceAccount(event.target.value as AccountId | "auto")}><option value="auto">파일명 자동 분류</option><option value="primary">운영계좌</option><option value="dues_intake">회비계좌</option></select>
+      <label className={`file-button${canEditLedger ? "" : " disabled"}`}><Upload size={16} /> 일괄 등록<input disabled={!canEditLedger} type="file" multiple accept="image/*,.heic,.heif,.pdf,.docx" onChange={(event) => { if (event.target.files?.length) uploadEvidence(event.target.files); event.currentTarget.value = ""; }} /></label>
     </section>
     <section className="workspace-grid package-controls">
-      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DETAILS</p><h3>제출 정보</h3></div></div><div className="form-grid"><label>동아리명<input value={clubName} onChange={(event) => setClubName(event.target.value)} /></label><label>회계 기간<input value={semester} onChange={(event) => setSemester(event.target.value)} /></label><label>회계담당자<input value={treasurerName} onChange={(event) => setTreasurerName(event.target.value)} /></label><label>회장<input value={presidentName} onChange={(event) => setPresidentName(event.target.value)} /></label><label>검토자<input value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} /></label><label>시작일<input value={PERIOD_START} disabled /></label></div></div>
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DETAILS</p><h3>제출 정보</h3></div></div><div className="form-grid"><label>동아리명<input disabled={!canCreate} value={clubName} onChange={(event) => setClubName(event.target.value)} /></label><label>회계 기간<input disabled={!canCreate} value={semester} onChange={(event) => setSemester(event.target.value)} /></label><label>회계담당자<input disabled={!canCreate} value={treasurerName} onChange={(event) => setTreasurerName(event.target.value)} /></label><label>회장<input disabled={!canCreate} value={presidentName} onChange={(event) => setPresidentName(event.target.value)} /></label><label>검토자<input disabled={!canCreate} value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} /></label><label>시작일<input value={PERIOD_START} disabled /></label></div></div>
       <div className="panel job-panel"><div className="panel-heading"><div><p className="eyebrow">STATUS</p><h3>현재 작업</h3></div>{job?.status && <StatusBadge value={job.status} />}</div>{packageData?.validation ? <><div className="validation-summary"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div><dl className="coverage"><div><dt>운영 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.primary?.transaction_rows || 0}건</dd></div><div><dt>회비 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.dues_intake?.transaction_rows || 0}건</dd></div><div><dt>운영 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.primary?.embedded_files || 0}개</dd></div><div><dt>회비 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.dues_intake?.embedded_files || 0}개</dd></div></dl></> : <p className="muted">두 계좌의 준비 상태를 확인한 뒤 패키지를 생성합니다.</p>}</div>
     </section>
     <section className="action-bar">
-      <button disabled={!ready} onClick={() => createPackage().catch(() => undefined)}><FileArchive size={17} /> 통합 패키지 생성</button>
-      <button className="secondary" disabled={packageData?.status !== "draft"} onClick={async () => { const result = await run("검토 요청", () => api<any>(`/packages/${packageData.id}/submit-review`, token, { method: "POST" })); if (result) setPackageData(result); }}><ShieldCheck size={17} /> 검토 요청</button>
-      <button className="approve" disabled={packageData?.status !== "pending_review"} onClick={async () => { const result = await run("패키지 승인", () => api<any>(`/packages/${packageData.id}/approve`, token, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button>
+      <button disabled={!canCreate || !ready} onClick={() => createPackage().catch(() => undefined)}><FileArchive size={17} /> 통합 패키지 생성</button>
+      <button className="secondary" disabled={!canCreate || packageData?.status !== "draft"} onClick={async () => { const result = await run("검토 요청", () => api<any>(`/packages/${packageData.id}/submit-review`, token, { method: "POST" })); if (result) setPackageData(result); }}><ShieldCheck size={17} /> 검토 요청</button>
+      <button className="approve" disabled={!canApprove || packageData?.status !== "pending_review"} onClick={async () => { const result = await run("패키지 승인", () => api<any>(`/packages/${packageData.id}/approve`, token, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button>
       <button className="secondary" disabled={!packageData?.zip_path} onClick={() => run("ZIP 다운로드", downloadPackage)}><Download size={17} /> ZIP 다운로드</button>
     </section>
   </>;
@@ -509,7 +495,7 @@ function PackagePage({ token, run }: { token: string; run: Runner }) {
 function AccountReadiness({ accountId, snapshot, historyCount }: { accountId: AccountId; snapshot: any; historyCount: number }) {
   const ready = Boolean(snapshot?.id && historyCount);
   const evidence = (snapshot?.evidence || []).filter((item: any) => item.kind !== "account_capture" && item.preview_available).length;
-  return <article className={ready ? "ready" : ""}><div className="readiness-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={ready ? "READY" : "REQUIRED"} /></div><dl><div><dt>장부</dt><dd>{snapshot?.transactions?.length ? `${snapshot.transactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{evidence}개</dd></div><div><dt>계좌 전체내역</dt><dd>{historyCount ? `${historyCount}개` : "필요"}</dd></div></dl></article>;
+  return <article className={ready ? "ready" : ""}><div className="readiness-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={ready ? "READY" : "REQUIRED"} /></div><dl><div><dt>장부</dt><dd>{snapshot?.transactions?.length ? `${snapshot.transactions.length}건` : "미등록"}</dd></div><div><dt>영수증·소명</dt><dd>{evidence}개</dd></div><div><dt>계좌 전체내역 캡처</dt><dd>{historyCount ? `${historyCount}개` : "필요"}</dd></div></dl></article>;
 }
 
 function snapshotSourceLabel(snapshot: any): string {
@@ -517,14 +503,14 @@ function snapshotSourceLabel(snapshot: any): string {
   if (action === "snapshot.checkpoint") return "수동 체크포인트";
   if (action === "snapshot.restore") return "과거 버전 복원";
   if (action === "evidence.attached") return "증빙 연결";
-  if (action === "bank_transactions.attached") return "계좌내역 연결";
   if (snapshot.source?.type === "google_sheets") return "Google Sheets";
   if (snapshot.source?.type === "workbook_upload") return "파일 가져오기";
   return "장부 생성";
 }
 
-function SnapshotManagementPage({ token, run }: { token: string; run: Runner }) {
+function SnapshotManagementPage({ token, run, role }: { token: string; run: Runner; role: Role }) {
   const [snapshots, setSnapshots] = useState<any[]>([]);
+  const editable = can(role, "admin", "accountant");
   const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
   const [note, setNote] = useState("");
 
@@ -548,19 +534,22 @@ function SnapshotManagementPage({ token, run }: { token: string; run: Runner }) 
     <section className="snapshot-current-grid">
       {(["primary", "dues_intake"] as AccountId[]).map((accountId) => {
         const current = latestByAccount[accountId];
-        return <article className="panel" key={accountId}><div className="panel-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={current ? "LATEST" : "EMPTY"} /></div>{current ? <dl className="snapshot-summary"><div><dt>거래</dt><dd>{current.transaction_count}건</dd></div><div><dt>증빙</dt><dd>{current.evidence_count}개</dd></div><div><dt>생성</dt><dd>{new Date(current.created_at).toLocaleString("ko-KR")}</dd></div></dl> : <p className="muted">현재 장부 스냅샷이 없습니다.</p>}<button disabled={!current} onClick={() => createRevision(current, "checkpoint").catch(() => undefined)}><History size={16} /> 현재 상태 스냅샷 생성</button>{!current && <button className="secondary" onClick={() => window.location.assign("/ledger")}><FileSpreadsheet size={16} /> 장부 연결</button>}</article>;
+        return <article className="panel" key={accountId}><div className="panel-heading"><div><span className={`account-tag ${accountId}`}>{accountId === "primary" ? "운영" : "회비"}</span><h3>{ACCOUNT_LABELS[accountId]}</h3></div><StatusBadge value={current ? "LATEST" : "EMPTY"} /></div>{current ? <dl className="snapshot-summary"><div><dt>거래</dt><dd>{current.transaction_count}건</dd></div><div><dt>증빙</dt><dd>{current.evidence_count}개</dd></div><div><dt>생성</dt><dd>{new Date(current.created_at).toLocaleString("ko-KR")}</dd></div></dl> : <p className="muted">현재 장부 스냅샷이 없습니다.</p>}<button disabled={!editable || !current} onClick={() => createRevision(current, "checkpoint").catch(() => undefined)}><History size={16} /> 현재 상태 스냅샷 생성</button>{!current && <button className="secondary" disabled={!editable} onClick={() => window.location.assign("/ledger")}><FileSpreadsheet size={16} /> 장부 연결</button>}</article>;
       })}
     </section>
     <section className="panel snapshot-history">
       <div className="panel-heading"><div><p className="eyebrow">VERSIONS</p><h3>스냅샷 이력</h3></div><select className="inline-select" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as AccountId | "all")}><option value="all">전체 계좌</option><option value="primary">{ACCOUNT_LABELS.primary}</option><option value="dues_intake">{ACCOUNT_LABELS.dues_intake}</option></select></div>
-      <label className="snapshot-note">메모<input value={note} maxLength={200} onChange={(event) => setNote(event.target.value)} placeholder="선택 사항" /></label>
-      <div className="table-scroll"><table><thead><tr><th>상태</th><th>계좌</th><th>생성 시각</th><th>거래</th><th>증빙</th><th>생성 원인</th><th>메모</th><th>작업</th></tr></thead><tbody>{visible.map((snapshot) => <tr key={snapshot.id}><td>{snapshot.is_latest ? <StatusBadge value="LATEST" /> : "-"}</td><td><span className={`account-tag ${snapshot.account_id}`}>{snapshot.account_id === "dues_intake" ? "회비" : "운영"}</span></td><td>{new Date(snapshot.created_at).toLocaleString("ko-KR")}</td><td>{snapshot.transaction_count}건</td><td>{snapshot.evidence_count}개</td><td>{snapshotSourceLabel(snapshot)}</td><td>{snapshot.source?.mutation?.note || "-"}</td><td><button className="icon-button" disabled={snapshot.is_latest} title="이 버전 복원" aria-label={`${snapshot.id} 복원`} onClick={() => createRevision(snapshot, "restore").catch(() => undefined)}><RotateCcw size={15} /></button></td></tr>)}{!visible.length && <tr><td className="empty-row" colSpan={8}>스냅샷이 없습니다.</td></tr>}</tbody></table></div>
+      <label className="snapshot-note">메모<input disabled={!editable} value={note} maxLength={200} onChange={(event) => setNote(event.target.value)} placeholder="선택 사항" /></label>
+      <div className="table-scroll"><table><thead><tr><th>상태</th><th>계좌</th><th>생성 시각</th><th>거래</th><th>증빙</th><th>생성 원인</th><th>메모</th><th>작업</th></tr></thead><tbody>{visible.map((snapshot) => <tr key={snapshot.id}><td>{snapshot.is_latest ? <StatusBadge value="LATEST" /> : "-"}</td><td><span className={`account-tag ${snapshot.account_id}`}>{snapshot.account_id === "dues_intake" ? "회비" : "운영"}</span></td><td>{new Date(snapshot.created_at).toLocaleString("ko-KR")}</td><td>{snapshot.transaction_count}건</td><td>{snapshot.evidence_count}개</td><td>{snapshotSourceLabel(snapshot)}</td><td>{snapshot.source?.mutation?.note || "-"}</td><td><button className="icon-button" disabled={!editable || snapshot.is_latest} title="이 버전 복원" aria-label={`${snapshot.id} 복원`} onClick={() => createRevision(snapshot, "restore").catch(() => undefined)}><RotateCcw size={15} /></button></td></tr>)}{!visible.length && <tr><td className="empty-row" colSpan={8}>스냅샷이 없습니다.</td></tr>}</tbody></table></div>
     </section>
   </>;
 }
 
-function PublicReportAdminPage({ token, run }: { token: string; run: Runner }) {
+function PublicReportAdminPage({ token, run, role }: { token: string; run: Runner; role: Role }) {
   const workspace = useWorkspace(token, run);
+  const canManageReport = can(role, "admin", "accountant", "president");
+  const canManageWebhook = can(role, "admin", "accountant");
+  const canApprove = can(role, "admin", "president", "reviewer");
   const [month, setMonth] = useState(previousMonthValue());
   const [expiresAt, setExpiresAt] = useState("");
   const [report, setReport] = useState<any>(null);
@@ -590,57 +579,16 @@ function PublicReportAdminPage({ token, run }: { token: string; run: Runner }) {
   return <>
     <PageHeading eyebrow="MEMBER DISCLOSURE" title="월간 공개" description="선택한 달의 운영계좌 내역을 공개하고 Discord에 전송합니다." badge={(message || report) && <StatusBadge value={message?.status || report?.status || "ACTIVE"} />} />
     <section className="workspace-grid">
-      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">PUBLIC LINK</p><h3>공개 설정</h3></div></div><div className="form-grid"><label>공개 월<input type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label><label>링크 만료일<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label><label className="wide-field">사용 장부<input value={primary?.id || "동아리운영계좌 장부 미등록"} disabled /></label></div><div className="privacy-panel compact"><p>선택 월의 거래만 공개하며 계좌번호, 증빙 원본, 거래 상대방, 내부 검토 정보는 제외합니다.</p></div>{report?.public_url && <div className="link-output compact"><Link2 size={16} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a>{report.expires_at && <span>{new Date(report.expires_at).toLocaleString("ko-KR")} 만료</span>}</div>}</div>
-      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DISCORD</p><h3>전송 승인</h3></div></div><div className="form-stack"><label>Webhook 이름<input value={webhookName} onChange={(event) => setWebhookName(event.target.value)} /></label><label>Webhook URL<input type="password" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} placeholder={webhook?.masked_url || "https://discord.com/api/webhooks/..."} /></label></div><div className="approval-flow"><span className={message ? "done" : ""}>미리보기</span><i /><span className={["approved", "sent"].includes(message?.status) ? "done" : ""}>승인</span><i /><span className={message?.status === "sent" ? "done" : ""}>전송</span></div>{message?.preview && <pre className="message-preview">{message.preview}</pre>}</div>
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">PUBLIC LINK</p><h3>공개 설정</h3></div></div><div className="form-grid"><label>공개 월<input disabled={!canManageReport} type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label><label>링크 만료일<input disabled={!canManageReport} type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label><label className="wide-field">사용 장부<input value={primary?.id || "동아리운영계좌 장부 미등록"} disabled /></label></div><div className="privacy-panel compact"><p>선택 월의 거래만 공개하며 계좌번호, 증빙 원본, 거래 상대방, 내부 검토 정보는 제외합니다.</p></div>{report?.public_url && <div className="link-output compact"><Link2 size={16} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a>{report.expires_at && <span>{new Date(report.expires_at).toLocaleString("ko-KR")} 만료</span>}</div>}</div>
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DISCORD</p><h3>전송 승인</h3></div></div><div className="form-stack"><label>Webhook 이름<input disabled={!canManageWebhook} value={webhookName} onChange={(event) => setWebhookName(event.target.value)} /></label><label>Webhook URL<input disabled={!canManageWebhook} type="password" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} placeholder={webhook?.masked_url || "https://discord.com/api/webhooks/..."} /></label></div><div className="approval-flow"><span className={message ? "done" : ""}>미리보기</span><i /><span className={["approved", "sent"].includes(message?.status) ? "done" : ""}>승인</span><i /><span className={message?.status === "sent" ? "done" : ""}>전송</span></div>{message?.preview && <pre className="message-preview">{message.preview}</pre>}</div>
     </section>
     <section className="action-bar">
-      <button disabled={!primary?.id || !month} onClick={() => createReport().catch(() => undefined)}><Link2 size={17} /> 공개 페이지 생성</button>
+      <button disabled={!canManageReport || !primary?.id || !month} onClick={() => createReport().catch(() => undefined)}><Link2 size={17} /> 공개 페이지 생성</button>
       <button className="secondary" disabled={!report?.public_url} onClick={() => window.open(report.public_url, "_blank", "noopener,noreferrer")}><ExternalLink size={17} /> 페이지 열기</button>
-      <button className="secondary" disabled={!webhookUrl} onClick={async () => { const result = await run("Discord Webhook 저장", () => api<any>("/discord/webhooks", token, { method: "POST", body: JSON.stringify({ name: webhookName, webhook_url: webhookUrl }) })); if (result) { setWebhook(result); setWebhookUrl(""); } }}><ShieldCheck size={17} /> Webhook 저장</button>
-      <button className="secondary" disabled={!report?.share_id || !webhook?.id} onClick={async () => { const result = await run("Discord 메시지 미리보기", () => api<any>("/discord/messages/preview", token, { method: "POST", body: JSON.stringify({ share_id: report.share_id, webhook_id: webhook.id }) })); if (result) setMessage(result); }}><ReceiptText size={17} /> 미리보기</button>
-      <button className="approve" disabled={message?.status !== "pending_approval"} onClick={async () => { const result = await run("Discord 메시지 승인", () => api<any>(`/discord/messages/${message.message_id}/approve`, token, { method: "POST" })); if (result) setMessage(result); }}><CheckCircle2 size={17} /> 승인</button>
-      <button disabled={!(["approved", "failed"].includes(message?.status))} onClick={async () => { const result = await run("Discord 메시지 전송", () => api<any>(`/discord/messages/${message.message_id}/send`, token, { method: "POST" })); if (result) setMessage(result); }}><Send size={17} /> 전송</button>
-    </section>
-  </>;
-}
-
-function MonthlyDeliveryPage({ token, run }: { token: string; run: Runner }) {
-  const workspace = useWorkspace(token, run);
-  const [report, setReport] = useState<any>(null);
-  const [webhookName, setWebhookName] = useState("Aegis 회계 공지");
-  const [webhookUrl, setWebhookUrl] = useState("");
-  const [webhook, setWebhook] = useState<any>(null);
-  const [message, setMessage] = useState<any>(null);
-  const googleWritable = Boolean(workspace.googleConnection?.connected && workspace.googleConnection?.write_access);
-
-  useEffect(() => {
-    api<any[]>("/monthly-reports", token).then((rows) => setReport(rows.find((item) => item.source_type === "google_sheet") || null)).catch(() => undefined);
-    api<any[]>("/discord/webhooks", token).then((rows) => setWebhook(rows[0] || null)).catch(() => undefined);
-  }, [token]);
-
-  async function publish() {
-    if (!workspace.primarySource.trim() || !workspace.monthlyDestination.trim()) {
-      await run("월별 공개 시트 생성", async () => { throw new Error("원본 장부와 공개 대상 Google Sheets를 입력해주세요."); });
-      return;
-    }
-    const result = await run(`${previousMonthLabel()} 공개 시트 생성`, () => api<any>("/monthly-reports/google-sheet", token, {
-      method: "POST",
-      body: JSON.stringify({ source_spreadsheet_url_or_id: workspace.primarySource, destination_spreadsheet_url_or_id: workspace.monthlyDestination, range: workspace.range, club_name: "Aegis" }),
-    }));
-    if (result) { setReport(result); setMessage(null); }
-  }
-
-  return <>
-    <PageHeading eyebrow="MONTHLY DELIVERY" title="월별 내역 전송" description={`${previousMonthLabel()} 동아리운영계좌 내역을 Google Sheets로 공개하고 Discord에 전송합니다.`} badge={message && <StatusBadge value={message.status} />} />
-    <section className="workspace-grid">
-      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">GOOGLE SHEETS</p><h3>공개 시트</h3></div><StatusBadge value={googleWritable ? "CONNECTED" : workspace.googleConnection?.connected ? "RECONNECT" : "DISCONNECTED"} /></div><div className="form-stack"><label>원본 동아리운영계좌 장부<input value={workspace.primarySource} onChange={(event) => workspace.setPrimarySource(event.target.value)} placeholder="Google Sheets URL 또는 ID" /></label><label>공개 대상 Google Sheets<input value={workspace.monthlyDestination} onChange={(event) => workspace.setMonthlyDestination(event.target.value)} placeholder="새 월별 시트를 추가할 Spreadsheet" /></label><p className="sharing-warning">대상 Spreadsheet 파일 전체가 링크 공개됩니다. 월별 회원 공개 전용 파일을 지정하세요.</p><label>원본 범위<input value={workspace.range} onChange={(event) => workspace.setRange(event.target.value)} /></label></div><div className="button-row">{workspace.googleConnection?.connected ? <button className="secondary danger" onClick={workspace.disconnectGoogle}><LogOut size={16} /> 연결 해제</button> : <button onClick={workspace.connectGoogle}><Link2 size={16} /> Google 계정 연결</button>}<button disabled={!googleWritable} onClick={() => publish().catch(() => undefined)}><FileSpreadsheet size={16} /> {previousMonthLabel()} 시트 생성</button></div>{report?.public_url && <div className="link-output compact"><Link2 size={16} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.sheet_title || report.month}</a></div>}</div>
-      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DISCORD</p><h3>전송 승인</h3></div></div><div className="form-stack"><label>Webhook 이름<input value={webhookName} onChange={(event) => setWebhookName(event.target.value)} /></label><label>Webhook URL<input type="password" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} placeholder={webhook?.masked_url || "https://discord.com/api/webhooks/..."} /></label></div><div className="approval-flow"><span className={message ? "done" : ""}>미리보기</span><i /><span className={["approved", "sent"].includes(message?.status) ? "done" : ""}>승인</span><i /><span className={message?.status === "sent" ? "done" : ""}>전송</span></div>{message?.preview && <pre className="message-preview">{message.preview}</pre>}</div>
-    </section>
-    <section className="action-bar">
-      <button className="secondary" disabled={!webhookUrl} onClick={async () => { const result = await run("Discord Webhook 저장", () => api<any>("/discord/webhooks", token, { method: "POST", body: JSON.stringify({ name: webhookName, webhook_url: webhookUrl }) })); if (result) { setWebhook(result); setWebhookUrl(""); } }}><ShieldCheck size={17} /> Webhook 저장</button>
-      <button className="secondary" disabled={!report?.share_id || !webhook?.id} onClick={async () => { const result = await run("Discord 메시지 미리보기", () => api<any>("/discord/messages/preview", token, { method: "POST", body: JSON.stringify({ share_id: report.share_id, webhook_id: webhook.id }) })); if (result) setMessage(result); }}><ReceiptText size={17} /> 미리보기</button>
-      <button className="approve" disabled={message?.status !== "pending_approval"} onClick={async () => { const result = await run("Discord 메시지 승인", () => api<any>(`/discord/messages/${message.message_id}/approve`, token, { method: "POST" })); if (result) setMessage(result); }}><CheckCircle2 size={17} /> 승인</button>
-      <button disabled={!(["approved", "failed"].includes(message?.status))} onClick={async () => { const result = await run("Discord 메시지 전송", () => api<any>(`/discord/messages/${message.message_id}/send`, token, { method: "POST" })); if (result) setMessage(result); }}><Send size={17} /> 전송</button>
+      <button className="secondary" disabled={!canManageWebhook || !webhookUrl} onClick={async () => { const result = await run("Discord Webhook 저장", () => api<any>("/discord/webhooks", token, { method: "POST", body: JSON.stringify({ name: webhookName, webhook_url: webhookUrl }) })); if (result) { setWebhook(result); setWebhookUrl(""); } }}><ShieldCheck size={17} /> Webhook 저장</button>
+      <button className="secondary" disabled={!canManageReport || !report?.share_id || !webhook?.id} onClick={async () => { const result = await run("Discord 메시지 미리보기", () => api<any>("/discord/messages/preview", token, { method: "POST", body: JSON.stringify({ share_id: report.share_id, webhook_id: webhook.id }) })); if (result) setMessage(result); }}><ReceiptText size={17} /> 미리보기</button>
+      <button className="approve" disabled={!canApprove || message?.status !== "pending_approval"} onClick={async () => { const result = await run("Discord 메시지 승인", () => api<any>(`/discord/messages/${message.message_id}/approve`, token, { method: "POST" })); if (result) setMessage(result); }}><CheckCircle2 size={17} /> 승인</button>
+      <button disabled={!canManageReport || !(["approved", "failed"].includes(message?.status))} onClick={async () => { const result = await run("Discord 메시지 전송", () => api<any>(`/discord/messages/${message.message_id}/send`, token, { method: "POST" })); if (result) setMessage(result); }}><Send size={17} /> 전송</button>
     </section>
   </>;
 }
@@ -701,7 +649,7 @@ function App() {
   const route = routeFromPath();
   const [session, setSession] = useState<Session | null>(() => storedSession());
   const [token, setToken] = useState(() => session?.token || sessionStorage.getItem("atlas_token") || "");
-  const [authReady, setAuthReady] = useState(() => Boolean(session));
+  const [authReady, setAuthReady] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
@@ -741,10 +689,6 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
     const state = params.get("state");
-    if (token && session) {
-      setAuthReady(true);
-      return;
-    }
     if (token) {
       api<Session>("/auth/me", token).then(storeSession).catch((error) => {
         clearSession();
@@ -769,7 +713,7 @@ function App() {
       return;
     }
     setAuthReady(true);
-  }, [clearSession, run, session, storeSession, token]);
+  }, [clearSession, run, storeSession, token]);
 
   const redirectToLogin = authReady && (!token || !session) && window.location.pathname !== "/";
   useEffect(() => {
@@ -800,7 +744,7 @@ function App() {
   if (!authReady || redirectToLogin) return <main className="login-page"><LoaderCircle className="spin" size={28} /></main>;
   if (!token || !session) return <main className="login-page"><Toast toast={toast} onClose={() => setToast(null)} /><section className="login-card"><img src="/aegis-logo.svg" alt="Aegis" /><h1>Aegis ATLAS 로그인</h1><p>권한이 부여된 Aegis 운영 계정만 접근할 수 있습니다.</p><button onClick={() => beginLogin().catch(() => undefined)}><ExternalLink size={16} /> Google 계정으로 로그인</button></section></main>;
   const activeRoute = route === "settings" && session.role !== "admin" ? "ledger" : route;
-  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/ledger"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>Aegis ATLAS</p><h1>Aegis Transaction Ledger &amp; Accounting System</h1></div></a><div className="session-state"><span><span className="dot online" />{session.email} · {ROLE_LABELS[session.role]}</span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => logout().catch(() => undefined)}><LogOut size={15} /></button></div></header><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={activeRoute === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{activeRoute === "ledger" ? <LedgerPage token={token} run={run} /> : activeRoute === "snapshots" ? <SnapshotManagementPage token={token} run={run} /> : activeRoute === "public-report" ? <PublicReportAdminPage token={token} run={run} /> : activeRoute === "settings" ? <SettingsPage token={token} run={run} /> : <PackagePage token={token} run={run} />}</div></main>;
+  return <main className="app-shell"><Toast toast={toast} onClose={() => setToast(null)} /><header className="topbar"><a className="brand" href="/ledger"><img src="/aegis-logo.svg" alt="Aegis" /><div><p>Aegis ATLAS</p><h1>Aegis Transaction Ledger &amp; Accounting System</h1></div></a><div className="session-state"><span><span className="dot online" />{session.email} · {ROLE_LABELS[session.role]}</span><button className="icon-button" title="로그아웃" aria-label="로그아웃" onClick={() => logout().catch(() => undefined)}><LogOut size={15} /></button></div></header><nav className="tabs" aria-label="ATLAS 메뉴">{tabs.map((tab) => <a key={tab.id} href={tab.href} className={activeRoute === tab.id ? "active" : ""}>{tab.icon}{tab.label}</a>)}</nav><div className="page-content">{activeRoute === "ledger" ? <LedgerPage token={token} run={run} role={session.role} /> : activeRoute === "snapshots" ? <SnapshotManagementPage token={token} run={run} role={session.role} /> : activeRoute === "public-report" ? <PublicReportAdminPage token={token} run={run} role={session.role} /> : activeRoute === "settings" ? <SettingsPage token={token} run={run} /> : <PackagePage token={token} run={run} role={session.role} />}</div></main>;
 }
 
 class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {

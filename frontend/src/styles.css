@@ -41,9 +41,10 @@ button, .file-button {
   text-decoration: none;
 }
 button:hover, .file-button:hover { background: var(--accent-hover); }
-button:disabled { cursor: not-allowed; opacity: .38; }
+button:disabled, .file-button.disabled { cursor: not-allowed; opacity: .38; pointer-events: none; }
 button.secondary, .file-button { border-color: var(--line-strong); background: #fff; color: #263338; }
 button.secondary:hover, .file-button:hover { background: #eef1f1; }
+.file-button.disabled:hover { background: #fff; }
 button.approve { border-color: #367b45; background: #367b45; }
 button.danger { color: var(--danger); border-color: #d8b5ae; }
 button.icon-button { width: 31px; min-height: 31px; padding: 0; border-color: var(--line-strong); background: #fff; color: #334247; }
@@ -59,7 +60,7 @@ input, select {
   color: var(--ink);
 }
 input:focus, select:focus { outline: 2px solid #b9d8d0; border-color: var(--accent); }
-input:disabled { background: #f0f2f2; color: #687277; }
+input:disabled, select:disabled { background: #f0f2f2; color: #687277; cursor: not-allowed; }
 label { display: grid; gap: 6px; color: #445157; font-size: 12px; font-weight: 600; }
 
 .app-shell, .public-shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 0 0 52px; }
@@ -102,9 +103,9 @@ label { display: grid; gap: 6px; color: #445157; font-size: 12px; font-weight: 6
 .google-panel { margin-bottom: 12px; }
 .google-fields { display: grid; grid-template-columns: 1fr 1fr 150px; gap: 9px; margin-bottom: 12px; }
 .compact-import { margin-bottom: 12px; }
-.file-controls { display: grid; grid-template-columns: .8fr 1.2fr; gap: 10px; }
+.file-controls { display: grid; gap: 10px; }
 .file-control { min-width: 0; padding: 12px; border: 1px solid #e0e4e5; border-radius: 6px; background: var(--surface-soft); display: grid; grid-template-columns: minmax(180px, 1fr) auto; align-items: end; gap: 8px; }
-.evidence-control { grid-template-columns: minmax(180px, 1fr) 130px auto; }
+.evidence-control { grid-template-columns: minmax(150px, .8fr) minmax(180px, 1fr) 130px auto; }
 .file-button input { display: none; }
 .transaction-panel { padding: 0; overflow: hidden; }
 .transaction-panel .panel-heading { min-height: 58px; margin: 0; padding: 14px 16px; align-items: center; }

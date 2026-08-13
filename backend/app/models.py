@@ -101,7 +101,6 @@ class LedgerSnapshotRequest(BaseModel):
 
 class WorkbookSnapshotRequest(BaseModel):
     ledger_upload_id: str
-    bank_upload_id: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     organization_id: str = "aegis"
     account_id: str = "primary"
@@ -119,10 +118,6 @@ class EvidenceAttachRequest(BaseModel):
 class SnapshotRevisionRequest(BaseModel):
     action: Literal["checkpoint", "restore"] = "checkpoint"
     note: str = Field(default="", max_length=200)
-
-
-class BankAttachRequest(BaseModel):
-    upload_id: str
 
 
 class TransactionPatchRequest(BaseModel):

@@ -40,6 +40,18 @@ class AccountingValidationTest(unittest.TestCase):
         self.assertIn("BALANCE_CONTINUITY", codes)
         self.assertIn("MISSING_CARD_EVIDENCE", codes)
         self.assertIn("CLOSING_BALANCE_MISMATCH", codes)
+        self.assertTrue(all(issue["transaction_number"] == 1 for issue in result["issues"] if issue["severity"] == "ERROR"))
+
+    def test_duplicate_evidence_error_lists_every_ledger_id(self) -> None:
+        transactions = [
+            Transaction(1, "2026-03-01", "비품", 0, 10_000, 90_000, evidence_ids=("shared",)),
+            Transaction(2, "2026-03-02", "간식", 0, 10_000, 80_000, evidence_ids=("shared",)),
+        ]
+
+        result = validate_ledger(100_000, transactions, [Evidence("shared", None, "receipt.png", "receipt")], 80_000)
+        issue = next(item for item in result["issues"] if item["code"] == "DUPLICATE_EVIDENCE_LINK")
+
+        self.assertEqual(issue["transaction_numbers"], (1, 2))
 
     def test_card_payment_and_cancellation_require_receipt_or_explanation(self) -> None:
         transactions = [
@@ -145,7 +157,6 @@ class PackageGenerationTest(unittest.TestCase):
                         Evidence("primary-receipt", 1, primary_receipt.name, "receipt", account_id="primary", local_path=str(primary_receipt)),
                         Evidence("primary-history", None, primary_history.name, "account_capture", account_id="primary", local_path=str(primary_history)),
                     ],
-                    "bank_transactions": [{"occurred_at": "2026-03-01T12:00:00", "description": "Primary bank row", "amount": -10_000, "balance": 90_000, "transaction_type": "카드"}],
                 },
                 "dues_intake": {
                     "snapshot_id": "snap-dues",
@@ -159,7 +170,6 @@ class PackageGenerationTest(unittest.TestCase):
                         Evidence("dues-receipt", 1, dues_receipt.name, "receipt", account_id="dues_intake", local_path=str(dues_receipt)),
                         Evidence("dues-history", None, dues_history.name, "account_capture", account_id="dues_intake", local_path=str(dues_history)),
                     ],
-                    "bank_transactions": [{"occurred_at": "2026-03-02T12:00:00", "description": "Dues bank row", "amount": -5_000, "balance": 195_000, "transaction_type": "이체"}],
                 },
             }
 
@@ -188,10 +198,10 @@ class PackageGenerationTest(unittest.TestCase):
         self.assertIn("운영계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
         self.assertNotIn("회비계좌 카드결제", "\n".join(cell.text for table in primary_document.tables for row in table.rows for cell in row.cells))
         self.assertIn("회비계좌 카드결제", "\n".join(cell.text for table in dues_document.tables for row in table.rows for cell in row.cells))
-        self.assertGreaterEqual(len(account_document.inline_shapes), 4)
+        self.assertEqual(len(account_document.inline_shapes), 2)
         self.assertEqual(len(account_document.tables[0].cell(0, 0).paragraphs), 1)
         self.assertEqual(len(account_document.tables[0].cell(0, 1).paragraphs), 1)
-        self.assertEqual(result["document_coverage"]["account_document"]["generated_bank_pages"], 2)
+        self.assertEqual(result["document_coverage"]["account_document"]["capture_file_count"], 2)
         self.assertEqual(result["validation"]["status"], "PASS")
         self.assertIn("동아리 계좌 전체내역.docx", names)
         self.assertIn("동아리 수입지출관리대장.xlsx", names)
@@ -222,6 +232,7 @@ class PackageGenerationTest(unittest.TestCase):
         self.assertEqual(result["validation"]["status"], "ERROR")
         self.assertEqual(result["document_coverage"]["evidence_document"]["missing_required_card_numbers"], [1])
         self.assertIn("MISSING_CARD_EVIDENCE", report)
+        self.assertIn("장부 ID: 1", report)
         self.assertIn("장부 1번 카드결제 거래에 매칭되는 소명자료 또는 영수증이 존재하지 않습니다.", report)
 
     def test_official_ledger_template_rejects_more_than_120_rows(self) -> None:

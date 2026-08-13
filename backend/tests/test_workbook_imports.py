@@ -18,7 +18,7 @@ from app.services.accounting import Evidence, Transaction
 from app.services.documents import build_submission_package
 from app.services.jobs import JobRunner
 from app.services.store import JsonStore
-from app.services.workbooks import parse_aegis_ledger, parse_woori_bank
+from app.services.workbooks import parse_aegis_ledger
 
 
 def make_ledger(path: Path, transaction_count: int = 2) -> None:
@@ -49,36 +49,15 @@ def make_ledger(path: Path, transaction_count: int = 2) -> None:
     workbook.save(path)
 
 
-def make_bank(path: Path) -> None:
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "sheet"
-    sheet.cell(2, 1, "계좌번호 : 1002-000-000000")
-    sheet.cell(3, 1, "조회기간 : 2026.01.01 ~ 2026.12.31")
-    headers = ["No.", "거래일시", "적요", "기재내용", "찾으신금액", "맡기신금액", "거래후 잔액", "취급기관", "메모"]
-    for index, value in enumerate(headers, 1):
-        sheet.cell(4, index, value)
-    rows = [
-        [1, "2026.03.02 12:00", "체크우리", "테스트상점", 200, 0, 800, "카드", "물품 1"],
-        [2, "2026.03.01 09:30", "인터넷", "이월금", 0, 1_000, 1_000, "우리은행", ""],
-    ]
-    for row, values in enumerate(rows, 5):
-        for column, value in enumerate(values, 1):
-            sheet.cell(row, column, value)
-    workbook.save(path)
-
-
 class WorkbookServiceTest(unittest.TestCase):
-    def test_parse_woori_and_never_truncate_documents(self) -> None:
+    def test_parse_ledger_and_never_truncate_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ledger_path = root / "ledger.xlsx"
-            bank_path = root / "bank.xlsx"
             receipt_path = root / "2_receipt.png"
             explanation_path = root / "3_explanation.pdf"
             capture_path = root / "account.png"
             make_ledger(ledger_path, transaction_count=41)
-            make_bank(bank_path)
             Image.new("RGB", (900, 500), "white").save(receipt_path)
             Image.new("RGB", (900, 1200), "white").save(capture_path)
             pdf = fitz.open()
@@ -89,13 +68,8 @@ class WorkbookServiceTest(unittest.TestCase):
             pdf.close()
 
             ledger = parse_aegis_ledger(ledger_path, period="2026년 1학기")
-            bank = parse_woori_bank(bank_path)
             self.assertEqual(ledger["transactions"][1]["processing_method"], "카드결제")
             self.assertEqual(ledger["transactions"][1]["details"], "결제처: 테스트상점")
-            self.assertEqual(bank["kind"], "woori_bank")
-            self.assertEqual([item["amount"] for item in bank["transactions"]], [1_000, -200])
-            self.assertEqual(bank["transactions"][0]["occurred_at"], "2026-03-01T09:30:00")
-            self.assertEqual(bank["closing_balance"], 800)
 
             transactions = [Transaction(**item) for item in ledger["transactions"]]
             evidence = [
@@ -116,7 +90,6 @@ class WorkbookServiceTest(unittest.TestCase):
                 transactions,
                 evidence,
                 40,
-                bank_transactions=bank["transactions"],
                 source_files=[
                     {
                         "kind": "ledger_workbook",
@@ -179,10 +152,8 @@ class WorkbookApiTest(unittest.TestCase):
 
     def test_upload_import_and_attach_evidence_snapshot(self) -> None:
         ledger_path = self.root / "Aegis-ledger.xlsx"
-        bank_path = self.root / "woori.xlsx"
         receipt_path = self.root / "2_receipt.png"
         make_ledger(ledger_path)
-        make_bank(bank_path)
         Image.new("RGB", (400, 300), "white").save(receipt_path)
         nfd_ledger_filename = unicodedata.normalize("NFD", "Aegis 회계장부.xlsx")
         nfd_evidence_filename = unicodedata.normalize("NFD", "#2# 영수증.png")
@@ -193,29 +164,20 @@ class WorkbookApiTest(unittest.TestCase):
                 headers=self.headers,
                 files={"file": (nfd_ledger_filename, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
             )
-        with bank_path.open("rb") as stream:
-            bank_upload = self.client.post(
-                "/imports/upload",
-                headers=self.headers,
-                files={"file": (bank_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            )
         self.assertEqual(ledger_upload.json()["detected_type"], "aegis_ledger")
         self.assertEqual(ledger_upload.json()["filename"], "Aegis 회계장부.xlsx")
         self.assertTrue(unicodedata.is_normalized("NFC", ledger_upload.json()["filename"]))
-        self.assertEqual(bank_upload.json()["detected_type"], "woori_bank")
 
         imported = self.client.post(
             "/imports/workbook-snapshot",
             headers=self.headers,
             json={
                 "ledger_upload_id": ledger_upload.json()["id"],
-                "bank_upload_id": bank_upload.json()["id"],
                 "period": "2026년 1학기",
             },
         )
         self.assertEqual(imported.status_code, 200)
         self.assertEqual(imported.json()["transaction_count"], 2)
-        self.assertEqual(imported.json()["bank"]["kind"], "woori_bank")
 
         with receipt_path.open("rb") as stream:
             evidence = self.client.post(
@@ -244,70 +206,21 @@ class WorkbookApiTest(unittest.TestCase):
         self.assertEqual(preview.status_code, 200)
         self.assertEqual(preview.content, receipt_path.read_bytes())
 
-    def test_bank_file_can_attach_to_google_ledger_snapshot_without_ledger_upload(self) -> None:
-        snapshot = self.client.post(
-            "/ledger-snapshots",
-            headers=self.headers,
-            json={
-                "account_id": "primary",
-                "period": "2026년 1학기",
-                "transactions": [
-                    {"number": 1, "date": "2026-03-01", "description": "이월금", "income": 1_000, "expense": 0, "balance": 1_000},
-                    {"number": 2, "date": "2026-03-02", "description": "물품 1", "income": 0, "expense": 200, "balance": 800},
-                ],
-            },
-        ).json()
-        bank_path = self.root / "woori-bank-only.xlsx"
-        make_bank(bank_path)
-        with bank_path.open("rb") as stream:
-            upload = self.client.post(
+    def test_import_rejects_non_ledger_files(self) -> None:
+        workbook_path = self.root / "unsupported.xlsx"
+        workbook = Workbook()
+        workbook.active.append(["거래일시", "출금", "입금"])
+        workbook.save(workbook_path)
+
+        with workbook_path.open("rb") as stream:
+            response = self.client.post(
                 "/imports/upload",
                 headers=self.headers,
-                files={"file": (bank_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            ).json()
+                files={"file": (workbook_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
 
-        attached = self.client.post(
-            f"/ledger-snapshots/{snapshot['id']}/bank-transactions",
-            headers=self.headers,
-            json={"upload_id": upload["id"]},
-        )
-
-        self.assertEqual(attached.status_code, 200)
-        result = attached.json()
-        self.assertEqual(len(result["source"]["bank_transactions"]), 2)
-        self.assertEqual(result["source"]["bank_summary"]["kind"], "woori_bank")
-        self.assertEqual(result["source"]["source_files"][0]["kind"], "bank_workbook")
-
-    def test_woori_file_cannot_attach_to_dues_account(self) -> None:
-        snapshot = self.client.post(
-            "/ledger-snapshots",
-            headers=self.headers,
-            json={
-                "account_id": "dues_intake",
-                "period": "2026년 1학기",
-                "transactions": [
-                    {"number": 1, "date": "2026-03-01", "description": "회비", "income": 1_000, "expense": 0, "balance": 1_000},
-                ],
-            },
-        ).json()
-        bank_path = self.root / "woori-wrong-account.xlsx"
-        make_bank(bank_path)
-        with bank_path.open("rb") as stream:
-            upload = self.client.post(
-                "/imports/upload",
-                headers=self.headers,
-                files={"file": (bank_path.name, stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            ).json()
-
-        attached = self.client.post(
-            f"/ledger-snapshots/{snapshot['id']}/bank-transactions",
-            headers=self.headers,
-            json={"upload_id": upload["id"]},
-        )
-
-        self.assertEqual(attached.status_code, 422)
-        self.assertIn("IBK 거래내역 PDF만", attached.json()["detail"])
-
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(main.store.read_collection("uploads"), {})
 
 if __name__ == "__main__":
     unittest.main()
