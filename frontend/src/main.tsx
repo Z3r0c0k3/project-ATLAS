@@ -93,6 +93,11 @@ function money(value: number): string {
   return `${Number(value || 0).toLocaleString("ko-KR")}원`;
 }
 
+function reportExpired(report: any): boolean {
+  const expiresAt = Date.parse(report?.expires_at || "");
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now();
+}
+
 async function parseApiError(response: Response): Promise<Error> {
   if (response.status === 403) return new Error("현재 권한으로 해당 작업을 진행할 수 없습니다.");
   const raw = await response.text();
@@ -561,11 +566,27 @@ function PublicReportAdminPage({ token, run, role }: { token: string; run: Runne
 
   useEffect(() => {
     api<any[]>("/monthly-reports", token).then((rows) => {
-      const latest = rows.find((item) => item.month_filter_version === 1 && item.status === "active");
+      const latest = rows.find((item) => item.month_filter_version === 1 && item.status === "active" && !reportExpired(item));
       if (latest) setReport({ ...latest, report_id: latest.id, public_url: `${window.location.origin}/public/monthly/${latest.share_id}` });
     }).catch(() => undefined);
     api<any[]>("/discord/webhooks", token).then((rows) => setWebhook(rows[0] || null)).catch(() => undefined);
   }, [token]);
+
+  useEffect(() => {
+    if (!report?.expires_at) return;
+    let timer = 0;
+    const hideWhenExpired = () => {
+      const remaining = Date.parse(report.expires_at) - Date.now();
+      if (remaining <= 0) {
+        setReport(null);
+        setMessage(null);
+        return;
+      }
+      timer = window.setTimeout(hideWhenExpired, Math.min(remaining, 60_000));
+    };
+    hideWhenExpired();
+    return () => window.clearTimeout(timer);
+  }, [report?.expires_at]);
 
   async function createReport() {
     if (!primary?.id) return;
@@ -576,10 +597,17 @@ function PublicReportAdminPage({ token, run, role }: { token: string; run: Runne
     if (result) { setReport({ ...result, status: "active" }); setMessage(null); }
   }
 
+  async function deleteReportLink() {
+    const reportId = report?.report_id || report?.id;
+    if (!reportId || !window.confirm("이 월간 공개 링크를 삭제할까요? 삭제 후에는 다시 접근할 수 없습니다.")) return;
+    const result = await run("월간 공개 링크 삭제", () => api<any>(`/monthly-reports/${reportId}/revoke`, token, { method: "POST" }));
+    if (result) { setReport(null); setMessage(null); }
+  }
+
   return <>
     <PageHeading eyebrow="MEMBER DISCLOSURE" title="월간 공개" description="선택한 달의 운영계좌 내역을 공개하고 Discord에 전송합니다." badge={(message || report) && <StatusBadge value={message?.status || report?.status || "ACTIVE"} />} />
     <section className="workspace-grid">
-      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">PUBLIC LINK</p><h3>공개 설정</h3></div></div><div className="form-grid"><label>공개 월<input disabled={!canManageReport} type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label><label>링크 만료일<input disabled={!canManageReport} type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label><label className="wide-field">사용 장부<input value={primary?.id || "동아리운영계좌 장부 미등록"} disabled /></label></div><div className="privacy-panel compact"><p>선택 월의 거래만 공개하며 계좌번호, 증빙 원본, 거래 상대방, 내부 검토 정보는 제외합니다.</p></div>{report?.public_url && <div className="link-output compact"><Link2 size={16} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a>{report.expires_at && <span>{new Date(report.expires_at).toLocaleString("ko-KR")} 만료</span>}</div>}</div>
+      <div className="panel"><div className="panel-heading"><div><p className="eyebrow">PUBLIC LINK</p><h3>공개 설정</h3></div></div><div className="form-grid"><label>공개 월<input disabled={!canManageReport} type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label><label>링크 만료일<input disabled={!canManageReport} type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label><label className="wide-field">사용 장부<input value={primary?.id || "동아리운영계좌 장부 미등록"} disabled /></label></div><div className="privacy-panel compact"><p>선택 월의 거래만 공개하며 계좌번호, 증빙 원본, 거래 상대방, 내부 검토 정보는 제외합니다.</p></div>{report?.public_url && <div className="link-output compact"><Link2 size={16} /><a href={report.public_url} target="_blank" rel="noreferrer">{report.public_url}</a>{report.expires_at && <span>{new Date(report.expires_at).toLocaleString("ko-KR")} 만료</span>}<button className="icon-button link-delete" disabled={!canManageReport} title="공개 링크 삭제" aria-label="공개 링크 삭제" onClick={() => deleteReportLink().catch(() => undefined)}><Trash2 size={15} /></button></div>}</div>
       <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DISCORD</p><h3>전송 승인</h3></div></div><div className="form-stack"><label>Webhook 이름<input disabled={!canManageWebhook} value={webhookName} onChange={(event) => setWebhookName(event.target.value)} /></label><label>Webhook URL<input disabled={!canManageWebhook} type="password" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} placeholder={webhook?.masked_url || "https://discord.com/api/webhooks/..."} /></label></div><div className="approval-flow"><span className={message ? "done" : ""}>미리보기</span><i /><span className={["approved", "sent"].includes(message?.status) ? "done" : ""}>승인</span><i /><span className={message?.status === "sent" ? "done" : ""}>전송</span></div>{message?.preview && <pre className="message-preview">{message.preview}</pre>}</div>
     </section>
     <section className="action-bar">
