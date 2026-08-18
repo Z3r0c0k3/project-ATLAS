@@ -129,7 +129,7 @@ async function apiBlob(path: string, token: string): Promise<Blob> {
 
 function storedSession(): Session | null {
   try {
-    const session = JSON.parse(sessionStorage.getItem("atlas_session") || "null") as Session | null;
+    const session = JSON.parse(localStorage.getItem("atlas_session") || sessionStorage.getItem("atlas_session") || "null") as Session | null;
     const expiresAt = Date.parse(session?.expires_at || "");
     if (!session?.token || !session.email || !session.role || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null;
     return session;
@@ -676,7 +676,7 @@ function SettingsPage({ token, run }: { token: string; run: Runner }) {
 function App() {
   const route = routeFromPath();
   const [session, setSession] = useState<Session | null>(() => storedSession());
-  const [token, setToken] = useState(() => session?.token || sessionStorage.getItem("atlas_token") || "");
+  const [token, setToken] = useState(() => session?.token || localStorage.getItem("atlas_token") || sessionStorage.getItem("atlas_token") || "");
   const [authReady, setAuthReady] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
 
@@ -699,13 +699,18 @@ function App() {
   }, []);
 
   const storeSession = useCallback((next: Session) => {
-    sessionStorage.setItem("atlas_token", next.token);
-    sessionStorage.setItem("atlas_session", JSON.stringify(next));
+    localStorage.setItem("atlas_token", next.token);
+    localStorage.setItem("atlas_session", JSON.stringify(next));
+    sessionStorage.removeItem("atlas_token");
+    sessionStorage.removeItem("atlas_session");
     setToken(next.token);
     setSession(next);
   }, []);
 
   const clearSession = useCallback(() => {
+    localStorage.removeItem("atlas_token");
+    localStorage.removeItem("atlas_session");
+    localStorage.removeItem("atlas_oauth_flow");
     sessionStorage.removeItem("atlas_token");
     sessionStorage.removeItem("atlas_session");
     sessionStorage.removeItem("atlas_oauth_flow");
@@ -717,14 +722,8 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
     const state = params.get("state");
-    if (token) {
-      api<Session>("/auth/me", token).then(storeSession).catch((error) => {
-        clearSession();
-        setToast({ kind: "error", title: "로그인 세션 확인 실패", detail: error instanceof Error ? error.message : "다시 로그인해주세요." });
-      }).finally(() => setAuthReady(true));
-      return;
-    }
-    if (code && state && sessionStorage.getItem("atlas_oauth_flow") === "login") {
+    const oauthFlow = localStorage.getItem("atlas_oauth_flow") || sessionStorage.getItem("atlas_oauth_flow");
+    if (code && state && oauthFlow === "login") {
       const redirectUri = `${window.location.origin}/`;
       run("Google 로그인", () => api<Session>("/auth/google/login", undefined, {
         method: "POST",
@@ -734,10 +733,19 @@ function App() {
           setAuthReady(true);
           return;
         }
+        localStorage.removeItem("atlas_oauth_flow");
         sessionStorage.removeItem("atlas_oauth_flow");
         storeSession(next);
-        window.location.replace("/ledger");
+        window.history.replaceState(null, "", "/ledger");
+        setAuthReady(true);
       });
+      return;
+    }
+    if (token) {
+      api<Session>("/auth/me", token).then(storeSession).catch((error) => {
+        clearSession();
+        setToast({ kind: "error", title: "로그인 세션 확인 실패", detail: error instanceof Error ? error.message : "다시 로그인해주세요." });
+      }).finally(() => setAuthReady(true));
       return;
     }
     setAuthReady(true);
@@ -750,7 +758,7 @@ function App() {
 
   async function beginLogin() {
     const redirectUri = `${window.location.origin}/`;
-    sessionStorage.setItem("atlas_oauth_flow", "login");
+    localStorage.setItem("atlas_oauth_flow", "login");
     const result = await run("Google 로그인 준비", () => api<any>(`/auth/google/login-url?redirect_uri=${encodeURIComponent(redirectUri)}`));
     if (result?.authorization_url) window.location.assign(result.authorization_url);
   }
