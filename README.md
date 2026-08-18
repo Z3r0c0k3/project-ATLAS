@@ -17,6 +17,7 @@ ATLAS(Aegis Transaction Ledger & Accounting System)는 Aegis의 장부 검증,
 - 검색엔진 색인 차단과 공개 필드 제한
 - 암호화된 Google OAuth 토큰 및 Discord Webhook 저장
 - Discord 미리보기, 별도 승인, 멱등 전송
+- Discord Webhook 기반 동연 패키지 결재 요청·승인·반려 알림
 - 이전 이벤트 해시를 연결한 감사 로그
 - Google Sheets/Drive 실제 API 어댑터
 - Aegis 장부 Excel 자동 판별·파싱
@@ -48,7 +49,7 @@ docker compose up --build
 4. 거래 목록에서 두 계좌가 분리되어 표시되고 증빙 돋보기로 원본이 열리는지 확인한다.
 5. `스냅샷 관리`에서 계좌별 최신 버전과 이력을 확인하고 필요한 체크포인트를 생성한다.
 6. `동연 패키지`에서 두 계좌 상태가 `READY`인지 확인하고 패키지를 생성한다.
-7. 검증 오류가 없으면 `검토 요청`, `승인`, `ZIP 다운로드`를 차례로 실행한다.
+7. 검증 오류가 없으면 `결재 요청`, `승인`, `ZIP 다운로드`를 차례로 실행한다.
 8. `월간 공개`에서 공개 월과 링크 만료일을 지정해 ATLAS 공개 페이지를 생성한다.
 9. 같은 화면에서 테스트용 Discord Webhook으로 미리보기, 승인, 전송 흐름을 확인한다.
 
@@ -132,6 +133,9 @@ npm audit --audit-level=moderate
 - `ATLAS_ADMIN_EMAIL`: 최초 관리자 Google 계정 이메일
 - `ATLAS_SESSION_HOURS`: 로그인 세션 유효시간, 기본 12시간
 - `PUBLIC_FRONTEND_BASE_URL`, `CORS_ORIGINS`: 실제 HTTPS 주소
+- `ATLAS_DISCORD_APPROVAL_WEBHOOK_URL`: 결재 알림을 보낼 Discord 채널 Webhook URL
+- `ATLAS_DISCORD_APPROVAL_USER_IDS`: 결재 요청 시 멘션할 Discord 사용자 ID(쉼표로 복수 지정)
+- `ATLAS_DISCORD_APPROVAL_ROLE_IDS`: 결재 요청 시 멘션할 Discord 역할 ID(쉼표로 복수 지정)
 
 안전한 난수는 다음처럼 만들 수 있다.
 

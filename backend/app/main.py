@@ -44,7 +44,7 @@ from .services.accounting import (
     public_monthly_summary,
     snapshot_payload,
 )
-from .services.discord import render_monthly_discord_message, send_webhook
+from .services.discord import render_monthly_discord_message, render_package_approval_message, send_webhook
 from .services.documents import build_combined_submission_package, build_monthly_report_payload, build_submission_package
 from .services.google import (
     GoogleApiError,
@@ -83,6 +83,13 @@ SESSION_HOURS = int(os.getenv("ATLAS_SESSION_HOURS", "12"))
 DEFAULT_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_LEDGER_SHEET_URL", "")
 DEFAULT_DUES_LEDGER_SHEET_URL = os.getenv("ATLAS_DEFAULT_DUES_LEDGER_SHEET_URL", "")
 DEFAULT_MONTHLY_PUBLIC_SHEET_URL = os.getenv("ATLAS_DEFAULT_MONTHLY_PUBLIC_SHEET_URL", "")
+DISCORD_APPROVAL_WEBHOOK_URL = os.getenv("ATLAS_DISCORD_APPROVAL_WEBHOOK_URL", "").strip()
+DISCORD_APPROVAL_USER_IDS = tuple(
+    item.strip() for item in os.getenv("ATLAS_DISCORD_APPROVAL_USER_IDS", "").split(",") if re.fullmatch(r"\d{15,22}", item.strip())
+)
+DISCORD_APPROVAL_ROLE_IDS = tuple(
+    item.strip() for item in os.getenv("ATLAS_DISCORD_APPROVAL_ROLE_IDS", "").split(",") if re.fullmatch(r"\d{15,22}", item.strip())
+)
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -170,6 +177,31 @@ def audit(
             "session_id": session.get("id"),
             "success": success,
         }
+    )
+
+
+def notify_package_approval(package: dict, event: str, actor: str, note: str | None = None) -> dict:
+    if not DISCORD_APPROVAL_WEBHOOK_URL:
+        result = {"ok": False, "status": "disabled", "error": "Discord 결재 Webhook이 설정되지 않았습니다."}
+    else:
+        approval_url = f"{PUBLIC_FRONTEND_BASE_URL}/package?package_id={package['id']}"
+        payload = render_package_approval_message(
+            package,
+            approval_url,
+            event,
+            actor,
+            DISCORD_APPROVAL_USER_IDS if event == "pending_review" else (),
+            DISCORD_APPROVAL_ROLE_IDS if event == "pending_review" else (),
+            note,
+        )
+        result = send_webhook(DISCORD_APPROVAL_WEBHOOK_URL, payload)
+        result["status"] = "sent" if result.get("ok") else "failed"
+    notification = {"event": event, "created_at": utc_now(), **result}
+    notifications = [*package.get("discord_approval_notifications", []), notification]
+    return store.update(
+        "packages",
+        package["id"],
+        {"discord_approval_notification": notification, "discord_approval_notifications": notifications},
     )
 
 
@@ -1464,10 +1496,16 @@ def submit_package_review(
     package = store.get("packages", package_id)
     if not package:
         raise HTTPException(status_code=404, detail="Package not found")
-    if package.get("status") != "draft":
-        raise HTTPException(status_code=409, detail="Only draft packages can be submitted for review")
-    updated = store.update("packages", package_id, {"status": "pending_review", "submitted_at": utc_now(), "submitted_by": session["username"]})
-    audit(session, "package.review_submitted", "package", package_id, before=package, after=updated, request=request)
+    if package.get("status") not in {"draft", "pending_review"}:
+        raise HTTPException(status_code=409, detail="Only draft or pending review packages can send an approval request")
+    if package.get("status") == "pending_review" and package.get("discord_approval_notification", {}).get("status") == "sent":
+        raise HTTPException(status_code=409, detail="Discord approval request was already sent")
+    updated = package
+    if package.get("status") == "draft":
+        updated = store.update("packages", package_id, {"status": "pending_review", "submitted_at": utc_now(), "submitted_by": session["username"]})
+    updated = notify_package_approval(updated, "pending_review", session["username"])
+    action = "package.review_submitted" if package.get("status") == "draft" else "package.review_notification_retried"
+    audit(session, action, "package", package_id, before=package, after=updated, request=request)
     return updated
 
 
@@ -1494,6 +1532,7 @@ def approve_package(
         package_id,
         {"status": "approved", "approved_at": utc_now(), "approved_by": session["username"], "review_note": payload.reason},
     )
+    updated = notify_package_approval(updated, "approved", session["username"], payload.reason)
     audit(session, "package.approved", "package", package_id, before=package, after=updated, request=request)
     return updated
 
@@ -1511,6 +1550,7 @@ def reject_package(
     if package.get("status") != "pending_review":
         raise HTTPException(status_code=409, detail="Package is not pending review")
     updated = store.update("packages", package_id, {"status": "rejected", "rejected_at": utc_now(), "rejected_by": session["username"], "review_note": payload.reason})
+    updated = notify_package_approval(updated, "rejected", session["username"], payload.reason)
     audit(session, "package.rejected", "package", package_id, before=package, after=updated, request=request)
     return updated
 

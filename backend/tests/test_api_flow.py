@@ -118,6 +118,72 @@ class ApiWorkflowTest(unittest.TestCase):
         self.assertTrue(audit["chain"]["valid"])
         self.assertGreaterEqual(audit["chain"]["event_count"], 6)
 
+    def test_package_review_sends_discord_mention_and_embed(self) -> None:
+        package = main.store.insert(
+            "packages",
+            {
+                "club_name": "Aegis",
+                "semester": "2026년 1학기",
+                "version": 2,
+                "status": "draft",
+                "validation": {"status": "PASS", "error_count": 0, "warning_count": 0},
+            },
+            "pkg",
+        )
+        with (
+            patch.object(main, "DISCORD_APPROVAL_WEBHOOK_URL", "https://discord.com/api/webhooks/123/token"),
+            patch.object(main, "DISCORD_APPROVAL_USER_IDS", ("123456789012345678",)),
+            patch.object(main, "DISCORD_APPROVAL_ROLE_IDS", ("234567890123456789",)),
+            patch("app.main.send_webhook", return_value={"ok": True, "status_code": 204, "sent_at": "now"}) as send,
+        ):
+            submitted = self.client.post(f"/packages/{package['id']}/submit-review", headers=self.headers)
+            approved = self.client.post(
+                f"/packages/{package['id']}/approve",
+                headers=self.headers,
+                json={"reason": "검토 완료"},
+            )
+
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(submitted.json()["discord_approval_notification"]["status"], "sent")
+        request_payload = send.call_args_list[0].args[1]
+        self.assertIn("<@123456789012345678>", request_payload["content"])
+        self.assertIn("<@&234567890123456789>", request_payload["content"])
+        self.assertEqual(request_payload["allowed_mentions"]["parse"], [])
+        self.assertIn(f"/package?package_id={package['id']}", request_payload["embeds"][0]["url"])
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "approved")
+        self.assertEqual(send.call_args_list[1].args[1]["embeds"][0]["title"], "[ATLAS] 결재 승인")
+
+    def test_failed_package_notification_can_be_retried_and_rejected(self) -> None:
+        package = main.store.insert(
+            "packages",
+            {
+                "club_name": "Aegis",
+                "semester": "2026년 1학기",
+                "status": "draft",
+                "validation": {"status": "PASS", "error_count": 0, "warning_count": 0},
+            },
+            "pkg",
+        )
+        with patch.object(main, "DISCORD_APPROVAL_WEBHOOK_URL", ""):
+            first = self.client.post(f"/packages/{package['id']}/submit-review", headers=self.headers)
+        self.assertEqual(first.json()["discord_approval_notification"]["status"], "disabled")
+
+        with (
+            patch.object(main, "DISCORD_APPROVAL_WEBHOOK_URL", "https://discord.com/api/webhooks/123/token"),
+            patch("app.main.send_webhook", return_value={"ok": True, "status_code": 204}) as send,
+        ):
+            retried = self.client.post(f"/packages/{package['id']}/submit-review", headers=self.headers)
+            rejected = self.client.post(
+                f"/packages/{package['id']}/reject",
+                headers=self.headers,
+                json={"reason": "증빙 보완 필요"},
+            )
+
+        self.assertEqual(retried.json()["discord_approval_notification"]["status"], "sent")
+        self.assertEqual(rejected.json()["status"], "rejected")
+        self.assertEqual(send.call_args_list[1].args[1]["embeds"][0]["title"], "[ATLAS] 결재 반려")
+
     def test_monthly_report_contains_only_selected_month_and_rejects_past_expiry(self) -> None:
         snapshot = self.client.post(
             "/ledger-snapshots",

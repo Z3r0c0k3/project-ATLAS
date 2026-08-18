@@ -390,11 +390,24 @@ function PackagePage({ token, run, role }: { token: string; run: Runner; role: R
   const [evidenceKind, setEvidenceKind] = useState("auto");
   const [job, setJob] = useState<any>(null);
   const [packageData, setPackageData] = useState<any>(null);
+  const [reviewNote, setReviewNote] = useState("");
   const primary = workspace.primarySnapshot;
   const dues = workspace.duesSnapshot;
   const primaryHistory = (primary?.evidence || []).filter((item: any) => item.kind === "account_capture").length;
   const duesHistory = (dues?.evidence || []).filter((item: any) => item.kind === "account_capture").length;
   const ready = Boolean(primary?.id && dues?.id && primaryHistory && duesHistory);
+
+  useEffect(() => {
+    const packageId = new URLSearchParams(window.location.search).get("package_id");
+    if (!packageId) return;
+    run("결재 요청 불러오기", () => api<any>(`/packages/${encodeURIComponent(packageId)}`, token)).then((result) => {
+      if (result) {
+        setPackageData(result);
+        setClubName(result.club_name || "Aegis");
+        setSemester(result.semester || `${CURRENT_YEAR}년 1학기`);
+      }
+    });
+  }, [run, token]);
 
   async function uploadEvidence(files: FileList) {
     const uploaded = await run("패키지 자료 업로드", async () => {
@@ -486,12 +499,13 @@ function PackagePage({ token, run, role }: { token: string; run: Runner; role: R
     </section>
     <section className="workspace-grid package-controls">
       <div className="panel"><div className="panel-heading"><div><p className="eyebrow">DETAILS</p><h3>제출 정보</h3></div></div><div className="form-grid"><label>동아리명<input disabled={!canCreate} value={clubName} onChange={(event) => setClubName(event.target.value)} /></label><label>회계 기간<input disabled={!canCreate} value={semester} onChange={(event) => setSemester(event.target.value)} /></label><label>회계담당자<input disabled={!canCreate} value={treasurerName} onChange={(event) => setTreasurerName(event.target.value)} /></label><label>회장<input disabled={!canCreate} value={presidentName} onChange={(event) => setPresidentName(event.target.value)} /></label><label>검토자<input disabled={!canCreate} value={reviewerName} onChange={(event) => setReviewerName(event.target.value)} /></label><label>시작일<input value={PERIOD_START} disabled /></label></div></div>
-      <div className="panel job-panel"><div className="panel-heading"><div><p className="eyebrow">STATUS</p><h3>현재 작업</h3></div>{job?.status && <StatusBadge value={job.status} />}</div>{packageData?.validation ? <><div className="validation-summary"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div><dl className="coverage"><div><dt>운영 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.primary?.transaction_rows || 0}건</dd></div><div><dt>회비 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.dues_intake?.transaction_rows || 0}건</dd></div><div><dt>운영 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.primary?.embedded_files || 0}개</dd></div><div><dt>회비 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.dues_intake?.embedded_files || 0}개</dd></div></dl></> : <p className="muted">두 계좌의 준비 상태를 확인한 뒤 패키지를 생성합니다.</p>}</div>
+      <div className="panel job-panel"><div className="panel-heading"><div><p className="eyebrow">STATUS</p><h3>현재 작업</h3></div>{(packageData?.status || job?.status) && <StatusBadge value={packageData?.status || job.status} />}</div>{packageData?.validation ? <><div className="validation-summary"><StatusBadge value={packageData.validation.status} /><span>오류 {packageData.validation.error_count} · 경고 {packageData.validation.warning_count}</span></div><dl className="coverage"><div><dt>운영 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.primary?.transaction_rows || 0}건</dd></div><div><dt>회비 장부</dt><dd>{packageData.document_coverage?.ledger?.accounts?.dues_intake?.transaction_rows || 0}건</dd></div><div><dt>운영 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.primary?.embedded_files || 0}개</dd></div><div><dt>회비 증빙</dt><dd>{packageData.document_coverage?.evidence_documents?.dues_intake?.embedded_files || 0}개</dd></div></dl>{packageData.discord_approval_notification && <div className="validation-summary"><StatusBadge value={packageData.discord_approval_notification.status || "FAILED"} /><span>Discord 결재 알림{packageData.discord_approval_notification.error ? ` · ${packageData.discord_approval_notification.error}` : ""}</span></div>}{packageData.status === "pending_review" && <label>결재 의견<input disabled={!canApprove} value={reviewNote} maxLength={500} onChange={(event) => setReviewNote(event.target.value)} placeholder="승인 또는 반려 사유" /></label>}</> : <p className="muted">두 계좌의 준비 상태를 확인한 뒤 패키지를 생성합니다.</p>}</div>
     </section>
     <section className="action-bar">
       <button disabled={!canCreate || !ready} onClick={() => createPackage().catch(() => undefined)}><FileArchive size={17} /> 통합 패키지 생성</button>
-      <button className="secondary" disabled={!canCreate || packageData?.status !== "draft"} onClick={async () => { const result = await run("검토 요청", () => api<any>(`/packages/${packageData.id}/submit-review`, token, { method: "POST" })); if (result) setPackageData(result); }}><ShieldCheck size={17} /> 검토 요청</button>
-      <button className="approve" disabled={!canApprove || packageData?.status !== "pending_review"} onClick={async () => { const result = await run("패키지 승인", () => api<any>(`/packages/${packageData.id}/approve`, token, { method: "POST", body: JSON.stringify({ reason: "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button>
+      <button className="secondary" disabled={!canCreate || !(packageData?.status === "draft" || (packageData?.status === "pending_review" && packageData?.discord_approval_notification?.status !== "sent"))} onClick={async () => { const result = await run("Discord 결재 요청", () => api<any>(`/packages/${packageData.id}/submit-review`, token, { method: "POST" })); if (result) setPackageData(result); }}><ShieldCheck size={17} /> {packageData?.status === "pending_review" ? "알림 재전송" : "결재 요청"}</button>
+      <button className="approve" disabled={!canApprove || packageData?.status !== "pending_review"} onClick={async () => { const result = await run("패키지 승인", () => api<any>(`/packages/${packageData.id}/approve`, token, { method: "POST", body: JSON.stringify({ reason: reviewNote.trim() || "검토 완료" }) })); if (result) setPackageData(result); }}><CheckCircle2 size={17} /> 승인</button>
+      <button className="danger" disabled={!canApprove || packageData?.status !== "pending_review" || !reviewNote.trim()} onClick={async () => { const result = await run("패키지 반려", () => api<any>(`/packages/${packageData.id}/reject`, token, { method: "POST", body: JSON.stringify({ reason: reviewNote.trim() }) })); if (result) setPackageData(result); }}><X size={17} /> 반려</button>
       <button className="secondary" disabled={!packageData?.zip_path} onClick={() => run("ZIP 다운로드", downloadPackage)}><Download size={17} /> ZIP 다운로드</button>
     </section>
   </>;
@@ -736,7 +750,10 @@ function App() {
         localStorage.removeItem("atlas_oauth_flow");
         sessionStorage.removeItem("atlas_oauth_flow");
         storeSession(next);
-        window.history.replaceState(null, "", "/ledger");
+        const requestedPath = localStorage.getItem("atlas_login_return_path");
+        localStorage.removeItem("atlas_login_return_path");
+        const returnPath = requestedPath?.startsWith("/") && !requestedPath.startsWith("//") ? requestedPath : "/ledger";
+        window.history.replaceState(null, "", returnPath);
         setAuthReady(true);
       });
       return;
@@ -753,7 +770,10 @@ function App() {
 
   const redirectToLogin = authReady && (!token || !session) && window.location.pathname !== "/";
   useEffect(() => {
-    if (redirectToLogin) window.location.replace("/");
+    if (redirectToLogin) {
+      localStorage.setItem("atlas_login_return_path", `${window.location.pathname}${window.location.search}`);
+      window.location.replace("/");
+    }
   }, [redirectToLogin]);
 
   async function beginLogin() {
